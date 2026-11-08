@@ -10,10 +10,13 @@
 import type {
   AgentTurnRequest,
   AgentTurnResponse,
+  AstSymbolNode,
   CcrRetrievalResult,
   CCRCompressedBlock,
   DagExecutionState,
   DashboardTelemetrySnapshot,
+  DiskCommitListResponse,
+  DiskRollbackReceipt,
   HookPostToolUseRequest,
   IndexFileRequest,
   IndexFileResponse,
@@ -25,6 +28,9 @@ import type {
   ResolveApprovalRequest,
   ResolveApprovalResponse,
   RetrieveCcrRequest,
+  RollbackArtifactRequest,
+  SaveDocumentRequest,
+  SaveDocumentResponse,
   StageDagRequest,
   StagedArtifact,
   TimelineResponse,
@@ -71,6 +77,28 @@ export interface ApexpadStagedArtifactsResponse {
 export interface ApexpadSpecListResponse {
   specs: StructuredSpecContract[]
   telemetry: DashboardTelemetrySnapshot
+}
+
+/* -------- PHASE 10 response envelopes -------- */
+
+export interface ApexpadRollbackResponse {
+  receipt: DiskRollbackReceipt
+  symbols: AstSymbolNode[]
+  telemetry: DashboardTelemetrySnapshot
+}
+
+/** Quarantined edit rows as served by the quarantine list endpoint. */
+export interface QuarantinedEditSummary {
+  quarantineId: string
+  sessionId: string
+  projectSlug: string
+  targetFilePath: string
+  blockingReasons: string[]
+  quarantinedAt: string
+}
+
+export interface ApexpadQuarantineListResponse {
+  quarantinedEdits: QuarantinedEditSummary[]
 }
 
 /* --------------------------------- core --------------------------------- */
@@ -141,6 +169,28 @@ export const apexpadApi = {
 
   resolveApproval: (body: ResolveApprovalRequest) =>
     request<ResolveApprovalResponse>('/api/apexpad/resolve-approval', body),
+
+  /* -------------------- Phase 10: disk commit / rollback -------------------- */
+
+  /** PHASE 10 (GAP #1): 1-click deterministic rollback of an approved commit. */
+  rollbackArtifact: (body: RollbackArtifactRequest) =>
+    request<ApexpadRollbackResponse>('/api/apexpad/dag-rollback', body),
+
+  /** PHASE 10 (GAP #4): persist the active editor document to the workspace disk. */
+  saveDocument: (body: SaveDocumentRequest) =>
+    request<SaveDocumentResponse>('/api/apexpad/save-document', body),
+
+  /** PHASE 10 (GAP #1): recent atomic disk commit receipts (`.bak` ledger). */
+  listDiskCommits: (sessionId?: string) =>
+    request<DiskCommitListResponse>(
+      `/api/apexpad/disk-commits${sessionId ? `?sessionId=${encodeURIComponent(sessionId)}` : ''}`,
+    ),
+
+  /** PHASE 10 (GAP #2): recent hard-quarantined candidate edits. */
+  listQuarantinedEdits: (sessionId?: string) =>
+    request<ApexpadQuarantineListResponse>(
+      `/api/apexpad/quarantined-edits${sessionId ? `?sessionId=${encodeURIComponent(sessionId)}` : ''}`,
+    ),
 
   /** Returns null when the CCR id is unknown — callers must handle that. */
   retrieveCcr: (body: RetrieveCcrRequest) =>

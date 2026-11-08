@@ -13,6 +13,8 @@ import type {
   AstSymbolNode,
   DagExecutionState,
   DashboardTelemetrySnapshot,
+  DiskCommitRecord,
+  DiskRollbackReceipt,
   MemorySearchIndexHit,
   MemoryTimelineEntry,
   ObservationRecord,
@@ -22,6 +24,7 @@ import type {
   StagedArtifact,
   UnattendedCaptureEvent,
 } from '@/lib/apexpad-types'
+import type { QuarantinedEditSummary } from '@/lib/apexpad-client'
 import type { StructuredSpecContract } from '@/lib/apexpad-guardrails-types'
 import { apexpadApi } from '@/lib/apexpad-client'
 import { useApexpadSse } from '@/hooks/use-apexpad-sse'
@@ -73,6 +76,18 @@ export default function Home() {
 
   const [busyArtifactId, setBusyArtifactId] = React.useState<string | null>(null)
 
+  /* ---------------- Phase 10: disk commit / quarantine state ---------------- */
+  const [savingToDisk, setSavingToDisk] = React.useState(false)
+  const [savedLocally, setSavedLocally] = React.useState<{
+    savedAt: string
+    byteLength: number
+    sha256: string
+  } | null>(null)
+  const [diskCommits, setDiskCommits] = React.useState<DiskCommitRecord[]>([])
+  const [rollbackReceipts, setRollbackReceipts] = React.useState<Record<string, DiskRollbackReceipt>>({})
+  const [busyRollbackArtifactId, setBusyRollbackArtifactId] = React.useState<string | null>(null)
+  const [quarantinedEdits, setQuarantinedEdits] = React.useState<QuarantinedEditSummary[]>([])
+
   const [ccrDialogOpen, setCcrDialogOpen] = React.useState(false)
   const [ccrDialogId, setCcrDialogId] = React.useState<string | null>(null)
 
@@ -115,6 +130,20 @@ export default function Home() {
     }
   }, [fail])
 
+  /** PHASE 10 (GAP #1): refresh the `.bak` commit ledger + quarantine list. */
+  const refreshDiskLedger = React.useCallback(async () => {
+    try {
+      const [commitsRes, quarantineRes] = await Promise.all([
+        apexpadApi.listDiskCommits(sessionId),
+        apexpadApi.listQuarantinedEdits(sessionId),
+      ])
+      setDiskCommits(commitsRes.commits)
+      setQuarantinedEdits(quarantineRes.quarantinedEdits)
+    } catch (err) {
+      fail(err)
+    }
+  }, [sessionId, fail])
+
   /* ------------------------------ SSE feed ------------------------------ */
 
   const sseConnected = useApexpadSse(
@@ -143,6 +172,7 @@ export default function Home() {
         setTelemetry(res.telemetry)
         setStagedArtifacts(res.stagedArtifacts)
         lastIndexedRef.current = DEFAULT_NOTE_CONTENT
+        void refreshDiskLedger()
       } catch (err) {
         if (!cancelled) fail(err)
       } finally {
@@ -285,12 +315,21 @@ export default function Home() {
           setEditorContent(res.resolved.proposedContent)
           setLastSavedContent(res.resolved.proposedContent)
           lastIndexedRef.current = res.resolved.proposedContent
+          if (res.diskReceipt) {
+            toast({
+              title: 'Artifact approved & atomically written to disk',
+              description: `${res.diskReceipt.targetFilePath} • sha256 ${res.diskReceipt.committedSha256.slice(0, 12)}… • backup: ${res.diskReceipt.backupFilePath ? '.apexpad-backups' : 'new file'}`,
+              ...TOAST_DARK,
+            })
+          }
+        } else {
+          toast({
+            title: 'Artifact rejected',
+            description: `${res.resolved.targetFilePath} — disk untouched.`,
+            ...TOAST_DARK,
+          })
         }
-        toast({
-          title: approved ? 'Artifact approved & committed' : 'Artifact rejected',
-          description: `${res.resolved.targetFilePath} — approval gate updated.`,
-          ...TOAST_DARK,
-        })
+        await refreshDiskLedger()
         return true
       } catch (err) {
         fail(err)
@@ -299,8 +338,67 @@ export default function Home() {
         setBusyArtifactId(null)
       }
     },
-    [fail, toast],
+    [fail, toast, refreshDiskLedger],
   )
+
+  /** PHASE 10 (GAP #1): 1-click deterministic `.bak` rollback. */
+  const rollbackArtifact = React.useCallback(
+    async (artifactId: string): Promise<boolean> => {
+      setBusyRollbackArtifactId(artifactId)
+      try {
+        const res = await apexpadApi.rollbackArtifact({
+          artifactId,
+          reason: 'Operator triggered 1-click rollback from Workbench',
+        })
+        setRollbackReceipts((prev) => ({ ...prev, [artifactId]: res.receipt }))
+        setStagedArtifacts((prev) =>
+          prev.map((a) => (a.artifactId === artifactId ? { ...a, status: 'rejected' as const } : a)),
+        )
+        setSymbols(res.symbols)
+        setTelemetry(res.telemetry)
+        toast({
+          title: res.receipt.wasDeletedBecauseNew ? 'Rolled back — new file deleted' : 'Rolled back from .bak snapshot',
+          description: `${res.receipt.restoredFilePath} restored deterministically${res.receipt.restoredSha256 ? ` (sha ${res.receipt.restoredSha256.slice(0, 12)}…)` : ''}`,
+          ...TOAST_DARK,
+        })
+        await refreshDiskLedger()
+        return true
+      } catch (err) {
+        fail(err)
+        return false
+      } finally {
+        setBusyRollbackArtifactId(null)
+      }
+    },
+    [fail, toast, refreshDiskLedger],
+  )
+
+  /** PHASE 10 (GAP #4): "Saved locally" — real disk persistence of the active document. */
+  const saveToDisk = React.useCallback(async () => {
+    setSavingToDisk(true)
+    try {
+      const receipt = await apexpadApi.saveDocument({
+        relativeFilePath: APEXPAD_ACTIVE_FILE,
+        content: editorContent,
+        notebook: 'workbench',
+        tags: [],
+      })
+      setSavedLocally({
+        savedAt: receipt.savedAt,
+        byteLength: receipt.byteLength,
+        sha256: receipt.sha256,
+      })
+      toast({
+        title: 'Saved locally',
+        description: `${receipt.filePath} • ${receipt.byteLength} B • sha256 ${receipt.sha256.slice(0, 12)}…`,
+        ...TOAST_DARK,
+      })
+    } catch (err) {
+      fail(err)
+    } finally {
+      setSavingToDisk(false)
+    }
+  }, [editorContent, fail, toast])
 
   const sendHook = React.useCallback(
     async (toolName: string, toolOutput: string) => {
@@ -419,6 +517,9 @@ export default function Home() {
         session={session}
         sseConnected={sseConnected}
         booting={booting}
+        savedLocally={savedLocally}
+        savingToDisk={savingToDisk}
+        onSaveToDisk={() => void saveToDisk()}
       />
 
       <main className="grid min-h-0 flex-1 grid-cols-1 gap-3 p-3 lg:grid-cols-[300px_minmax(0,1fr)_400px] lg:grid-rows-[minmax(0,1fr)] lg:overflow-hidden">
@@ -468,6 +569,11 @@ export default function Home() {
           onResolveApproval={resolveApproval}
           busyArtifactId={busyArtifactId}
           onRefreshTelemetry={() => void refreshTelemetry()}
+          diskCommits={diskCommits}
+          quarantinedEdits={quarantinedEdits}
+          rollbackReceipts={rollbackReceipts}
+          busyRollbackArtifactId={busyRollbackArtifactId}
+          onRollbackArtifact={rollbackArtifact}
         />
       </main>
 

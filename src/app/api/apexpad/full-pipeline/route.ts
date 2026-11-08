@@ -1,8 +1,12 @@
 /**
  * src/app/api/apexpad/full-pipeline/route.ts
  * §7.6 endpoint: runs the unified 4-stage engineering pipeline
- * (Spec Structurer -> Guardrails -> DAG Staging -> Runtime Verification)
- * from a raw user prompt to verified Staged Artifacts.
+ * (Spec Structurer -> Guardrails -> QUARANTINE GATE -> DAG Staging ->
+ * Runtime Verification) from a raw user prompt to verified Staged Artifacts.
+ *
+ * PHASE 10: `strictQuarantineGate` (default true) hard-blocks failing
+ * candidate edits before Artifact Staging — the response carries
+ * `quarantinedEdits[]` + `pipelineBlockedByQuarantine`.
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { getEngine, PROJECT_SLUG } from '@/server/apexpad/engine';
@@ -67,6 +71,7 @@ export async function POST(req: NextRequest) {
       browserVerificationScript: Array.isArray(body.browserVerificationScript)
         ? body.browserVerificationScript
         : undefined,
+      strictQuarantineGate: body.strictQuarantineGate,
     });
     const telemetry = await engine.modelAdapter.getDashboardTelemetry(PROJECT_SLUG);
 

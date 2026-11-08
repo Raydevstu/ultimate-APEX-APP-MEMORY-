@@ -2,7 +2,8 @@
 
 /**
  * src/components/apexpad/center-pane.tsx
- * Editor + minimap + line-jump flash + agent console + hook simulator.
+ * Editor + PHASE 10 interactive canvas minimap + line-jump flash + agent
+ * console + hook simulator.
  */
 import * as React from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
@@ -27,8 +28,8 @@ import { cn } from '@/lib/utils'
 import { prettyJson } from '@/lib/apexpad-client'
 import {
   EDITOR_LINE_HEIGHT_PX,
-  GITHUB,
 } from './constants'
+import { InteractiveCodeMinimap } from './minimap'
 import {
   BTN_PRIMARY,
   BTN_SECONDARY,
@@ -42,60 +43,6 @@ import {
 } from './ui-kit'
 
 const EDITOR_PADDING_Y = 12 // py-3 on the textarea
-const MINIMAP_VISIBLE_LINES = 120
-
-/* -------------------------------- minimap -------------------------------- */
-
-function Minimap({
-  lines,
-  symbols,
-  activeFilePath,
-  scrollTop,
-}: {
-  lines: string[]
-  symbols: AstSymbolNode[]
-  activeFilePath: string
-  scrollTop: number
-}) {
-  const lineColors = React.useMemo(() => {
-    const colors = new Array<string>(lines.length).fill(GITHUB.border)
-    const fileSymbols = symbols.filter((s) => s.filePath === activeFilePath)
-    for (const symbol of fileSymbols) {
-      const from = Math.max(0, symbol.startLine - 1)
-      const to = Math.min(lines.length, symbol.endLine)
-      for (let i = from; i < to; i++) colors[i] = GITHUB.blue
-    }
-    for (const symbol of fileSymbols) {
-      if (symbol.cyclomaticComplexity <= 5) continue
-      const from = Math.max(0, symbol.startLine - 1)
-      const to = Math.min(lines.length, symbol.endLine)
-      for (let i = from; i < to; i++) colors[i] = GITHUB.red
-    }
-    return colors
-  }, [lines.length, symbols, activeFilePath])
-
-  const maxStart = Math.max(0, lines.length - MINIMAP_VISIBLE_LINES)
-  const start = Math.min(Math.max(0, Math.floor(scrollTop / EDITOR_LINE_HEIGHT_PX)), maxStart)
-  const visible = lines.slice(start, start + MINIMAP_VISIBLE_LINES)
-
-  return (
-    <div className="hidden w-[72px] shrink-0 flex-col border-l border-[#30363d] bg-[#0d1117] md:flex">
-      <TinyLabel className="py-1.5 text-center">Minimap</TinyLabel>
-      <div className="min-h-0 flex-1 overflow-hidden px-1.5 pb-2">
-        {visible.map((line, i) => {
-          const width = Math.min(100, Math.max(12, (line.length / 80) * 100))
-          return (
-            <div
-              key={start + i}
-              className="mb-[2px] h-[3px] rounded-sm"
-              style={{ width: `${width}%`, backgroundColor: lineColors[start + i] }}
-            />
-          )
-        })}
-      </div>
-    </div>
-  )
-}
 
 /* ----------------------------- agent console ----------------------------- */
 
@@ -449,13 +396,29 @@ export function CenterPane({
   onSendHook: (toolName: string, toolOutput: string) => Promise<void>
 }) {
   const [scrollTop, setScrollTop] = React.useState(0)
+  const [viewportHeightPx, setViewportHeightPx] = React.useState(340)
   const [flash, setFlash] = React.useState<{ nonce: number; top: number } | null>(null)
+  const editorWrapRef = React.useRef<HTMLDivElement | null>(null)
 
   const lines = React.useMemo(() => editorContent.split('\n'), [editorContent])
   const stats = React.useMemo(() => {
     const words = editorContent.split(/\s+/).filter(Boolean).length
     return { lines: lines.length, words, chars: editorContent.length }
   }, [editorContent, lines.length])
+
+  // Track the live editor viewport height for the minimap lens.
+  React.useEffect(() => {
+    const el = editorWrapRef.current
+    if (!el) return
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const h = Math.round(entry.contentRect.height)
+        if (h > 60) setViewportHeightPx(h)
+      }
+    })
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [])
 
   // Jump-to-line + flash when requested by the outline pane.
   React.useEffect(() => {
@@ -468,6 +431,21 @@ export function CenterPane({
     const timer = setTimeout(() => setFlash(null), 1100)
     return () => clearTimeout(timer)
   }, [scrollTarget, textareaRef])
+
+  /** PHASE 10: minimap click/drag navigation — jumps the editor to a line. */
+  const handleMinimapSelect = React.useCallback(
+    (lineIndex: number) => {
+      const ta = textareaRef.current
+      if (!ta) return
+      const targetY = EDITOR_PADDING_Y + lineIndex * EDITOR_LINE_HEIGHT_PX
+      ta.scrollTop = Math.max(0, targetY - 40)
+      setScrollTop(ta.scrollTop)
+      setFlash({ nonce: Date.now(), top: targetY - ta.scrollTop })
+      const timer = setTimeout(() => setFlash(null), 1100)
+      return () => clearTimeout(timer)
+    },
+    [textareaRef],
+  )
 
   return (
     <section className="flex min-h-0 flex-col gap-3 lg:h-full lg:overflow-hidden">
@@ -491,36 +469,41 @@ export function CenterPane({
         </div>
 
         <div className="relative flex min-h-0 flex-1">
-          <textarea
-            ref={textareaRef}
-            value={editorContent}
-            onChange={(e) => onEditorChange(e.target.value)}
-            onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
-            spellCheck={false}
-            className={cn(
-              'min-h-[320px] w-full flex-1 resize-none bg-transparent py-3 pl-4 pr-3 font-mono text-[13px] leading-[1.6] text-[#e6edf3] outline-none lg:min-h-0',
-              THIN_SCROLL,
-            )}
-          />
-          {/* line flash overlay on symbol click */}
-          <AnimatePresence>
-            {flash ? (
-              <motion.div
-                key={flash.nonce}
-                initial={{ opacity: 0.85 }}
-                animate={{ opacity: 0 }}
-                exit={{ opacity: 0 }}
-                transition={{ duration: 1.0, ease: 'easeOut' }}
-                className="pointer-events-none absolute left-0 right-0 h-[21px] rounded-sm border-y border-[#58a6ff]/50 bg-[#58a6ff]/15"
-                style={{ top: flash.top }}
-              />
-            ) : null}
-          </AnimatePresence>
-          <Minimap
+          <div ref={editorWrapRef} className="relative min-h-0 flex-1">
+            <textarea
+              ref={textareaRef}
+              value={editorContent}
+              onChange={(e) => onEditorChange(e.target.value)}
+              onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
+              spellCheck={false}
+              className={cn(
+                'min-h-[320px] w-full resize-none bg-transparent py-3 pl-4 pr-3 font-mono text-[13px] leading-[1.6] text-[#e6edf3] outline-none lg:min-h-0 lg:h-full',
+                THIN_SCROLL,
+              )}
+            />
+            {/* line flash overlay on symbol/minimap navigation */}
+            <AnimatePresence>
+              {flash ? (
+                <motion.div
+                  key={flash.nonce}
+                  initial={{ opacity: 0.85 }}
+                  animate={{ opacity: 0 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ duration: 1.0, ease: 'easeOut' }}
+                  className="pointer-events-none absolute left-0 right-0 h-[21px] rounded-sm border-y border-[#58a6ff]/50 bg-[#58a6ff]/15"
+                  style={{ top: flash.top }}
+                />
+              ) : null}
+            </AnimatePresence>
+          </div>
+          {/* PHASE 10: real interactive HTML5 canvas minimap (click/drag) */}
+          <InteractiveCodeMinimap
             lines={lines}
             symbols={symbols}
             activeFilePath={activeFilePath}
             scrollTop={scrollTop}
+            viewportHeightPx={viewportHeightPx}
+            onSelectLine={handleMinimapSelect}
           />
         </div>
       </div>

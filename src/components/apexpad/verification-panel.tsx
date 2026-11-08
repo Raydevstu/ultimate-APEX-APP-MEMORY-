@@ -25,11 +25,13 @@ import {
   Check,
   ChevronRight,
   FlaskConical,
+  Globe,
   Loader2,
   Play,
   Plus,
   RotateCcw,
   ShieldCheck,
+  TerminalSquare,
   Trash2,
   X,
 } from 'lucide-react'
@@ -922,6 +924,82 @@ function RuntimeVerifier({
                 </ul>
               </div>
             ) : null}
+
+            {/* PHASE 10 (GAP #3): real subprocess + CDP telemetry */}
+            {report.compilerTrace || report.testRunnerTrace || report.cdpProbe ? (
+              <div className="rounded-md border border-[#30363d] bg-[#0d1117] p-2">
+                <TinyLabel className="mb-1.5">
+                  Phase 10 subprocess telemetry (real child_process + CDP)
+                </TinyLabel>
+                <div className="space-y-2">
+                  {report.compilerTrace ? (
+                    <div className="flex items-start gap-1.5">
+                      <TerminalSquare className="mt-0.5 h-3 w-3 shrink-0 text-[#79c0ff]" />
+                      <div className="min-w-0 font-mono text-[9px] leading-relaxed text-[#8b949e]">
+                        <p className="break-all">
+                          compiler: <span className="text-[#79c0ff]">{report.compilerTrace.command}</span>
+                        </p>
+                        <p>
+                          exitCode:{' '}
+                          <span className={report.compilerTrace.exitCode === 0 ? 'text-[#3fb950]' : 'text-[#f85149]'}>
+                            {report.compilerTrace.exitCode}
+                          </span>{' '}
+                          • {report.compilerTrace.durationMs}ms
+                          {report.compilerTrace.ccrId ? ` • CCR ${report.compilerTrace.ccrId}` : ''}
+                        </p>
+                        {report.compilerTrace.stderrTail ? (
+                          <p className="whitespace-pre-wrap break-all text-[#d29922]">
+                            {report.compilerTrace.stderrTail.slice(0, 300)}
+                          </p>
+                        ) : null}
+                      </div>
+                    </div>
+                  ) : null}
+                  {report.testRunnerTrace ? (
+                    <div className="flex items-start gap-1.5">
+                      <TerminalSquare className="mt-0.5 h-3 w-3 shrink-0 text-[#7ee787]" />
+                      <div className="min-w-0 font-mono text-[9px] leading-relaxed text-[#8b949e]">
+                        <p className="break-all">
+                          test runner: <span className="text-[#7ee787]">{report.testRunnerTrace.command}</span>
+                        </p>
+                        <p>
+                          exitCode:{' '}
+                          <span className={report.testRunnerTrace.exitCode === 0 ? 'text-[#3fb950]' : 'text-[#f85149]'}>
+                            {report.testRunnerTrace.exitCode}
+                          </span>{' '}
+                          • {report.testRunnerTrace.durationMs}ms
+                          {report.testRunnerTrace.ccrId ? ` • CCR ${report.testRunnerTrace.ccrId}` : ''}
+                        </p>
+                        {report.testRunnerTrace.stdoutTail ? (
+                          <p className="whitespace-pre-wrap break-all">{report.testRunnerTrace.stdoutTail.slice(0, 300)}</p>
+                        ) : null}
+                      </div>
+                    </div>
+                  ) : (
+                    <p className="font-mono text-[9px] text-[#8b949e]">
+                      test runner: deterministic ripwire gate (no workspace-indexed test files to execute)
+                    </p>
+                  )}
+                  {report.cdpProbe ? (
+                    <div className="flex items-start gap-1.5">
+                      <Globe className="mt-0.5 h-3 w-3 shrink-0 text-[#d2a8ff]" />
+                      <div className="min-w-0 font-mono text-[9px] leading-relaxed text-[#8b949e]">
+                        <p>
+                          CDP probe: <span className="text-[#d2a8ff]">{report.cdpProbe.endpoint}</span> —{' '}
+                          <span className={report.cdpProbe.reachable ? 'text-[#3fb950]' : 'text-[#d29922]'}>
+                            {report.cdpProbe.reachable ? `reachable, ${report.cdpProbe.targetCount} target(s)` : 'unreachable (deterministic RefMap fallback)'}
+                          </span>
+                          {report.cdpProbe.error ? ` • ${report.cdpProbe.error}` : ''}
+                        </p>
+                        {report.cdpProbe.activePageUrl ? (
+                          <p className="break-all">active page: {report.cdpProbe.activePageUrl}</p>
+                        ) : null}
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+            ) : null}
           </div>
         </SectionCard>
       ) : null}
@@ -951,6 +1029,7 @@ function PipelineRunner({
   const { toast } = useToast()
   const [prompt, setPrompt] = React.useState(PIPELINE_DEMO_PROMPT)
   const [budget, setBudget] = React.useState(12000)
+  const [strictQuarantine, setStrictQuarantine] = React.useState(true)
   const [edits, setEdits] = React.useState<EditableEdit[]>([
     {
       targetFilePath: 'src/service/user.ts',
@@ -994,13 +1073,18 @@ function PipelineRunner({
         rawUserPrompt: prompt,
         tokenBudgetCeiling: budget,
         candidateEdits: edits,
+        strictQuarantineGate: strictQuarantine,
       })
       setResult(res.result)
       onDone()
       toast({
-        title: '4-stage pipeline complete',
-        description: `${res.result.specContract.specId} • ${res.result.guardrailReports.length} guardrail report(s) • ${res.result.dagState.status} • ${res.result.verificationReports.filter((v) => v.overallStatus === 'verified_ready_for_approval').length}/${res.result.verificationReports.length} verified`,
-        variant: res.result.dagState.status === 'halted_on_violation' ? 'destructive' : 'default',
+        title: res.result.pipelineBlockedByQuarantine
+          ? `Quarantine gate blocked ${res.result.quarantinedEdits.length} edit(s)`
+          : '4-stage pipeline complete',
+        description: res.result.pipelineBlockedByQuarantine
+          ? `${res.result.quarantinedEdits.map((q) => q.targetFilePath).join(', ')} never reached staging — blocking reasons recorded.`
+          : `${res.result.specContract.specId} • ${res.result.guardrailReports.length} guardrail report(s) • ${res.result.dagState.status} • ${res.result.verificationReports.filter((v) => v.overallStatus === 'verified_ready_for_approval').length}/${res.result.verificationReports.length} verified`,
+        variant: res.result.pipelineBlockedByQuarantine || res.result.dagState.status === 'halted_on_violation' ? 'destructive' : 'default',
         ...TOAST_DARK,
       })
     } catch (err) {
@@ -1061,6 +1145,18 @@ function PipelineRunner({
               className={cn(INPUT_DARK, 'w-full rounded-md border px-2 py-1.5')}
             />
           </div>
+          {/* PHASE 10 (GAP #2): strict pre-staging quarantine gate toggle */}
+          <label className="flex cursor-pointer items-center gap-2 rounded-md border border-[#30363d] bg-[#0d1117] px-2 py-2">
+            <input
+              type="checkbox"
+              checked={strictQuarantine}
+              onChange={(e) => setStrictQuarantine(e.target.checked)}
+              className="h-3.5 w-3.5 accent-[#f85149]"
+            />
+            <span className="font-mono text-[10px] text-[#c9d1d9]">
+              Strict quarantine gate — failing edits are hard-blocked before staging
+            </span>
+          </label>
           <button
             type="button"
             onClick={() => void run()}
@@ -1134,6 +1230,37 @@ function PipelineRunner({
 
       {result ? (
         <>
+          {result.pipelineBlockedByQuarantine ? (
+            <SectionCard title="PHASE 10 — HARD QUARANTINE GATE (blocked before staging)">
+              <div className="space-y-2">
+                {result.quarantinedEdits.map((q) => (
+                  <div
+                    key={q.quarantineId}
+                    className="rounded-md border border-[#f85149]/50 bg-[#f85149]/5 p-2"
+                  >
+                    <div className="mb-1 flex items-center gap-1.5">
+                      <AlertTriangle className="h-3.5 w-3.5 text-[#f85149]" />
+                      <span className="break-all font-mono text-[10px] font-bold text-[#f85149]">
+                        {q.targetFilePath}
+                      </span>
+                    </div>
+                    <ul className="space-y-0.5">
+                      {q.blockingReasons.map((reason, i) => (
+                        <li key={i} className="font-mono text-[9px] leading-relaxed text-[#f85149]/90">
+                          ⚠ {reason}
+                        </li>
+                      ))}
+                    </ul>
+                    <p className="mt-1 font-mono text-[9px] text-[#8b949e]">
+                      quarantined {new Date(q.quarantinedAt).toLocaleString()} — persisted to
+                      quarantined_edits; NEVER staged.
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </SectionCard>
+          ) : null}
+
           <SectionCard title="Stage 1 — Specification Contract (Task 2)">
             <div className="space-y-1 font-mono text-[10px] text-[#8b949e]">
               <p>

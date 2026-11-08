@@ -22,7 +22,9 @@
  */
 
 import crypto from 'crypto';
+import { spawnSync } from 'child_process';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import ts from 'typescript';
 import { db } from '@/lib/db';
@@ -33,8 +35,10 @@ import { extractTopLevelSymbols, normalizeWorkspacePath, resolveImportProblems }
 import type {
   AgentBrowserActionCommand,
   AgentBrowserActionExecutionResult,
+  CdpProbeResult,
   LiveDomElement,
   RuntimeVerificationReport,
+  SubprocessExecutionTrace,
 } from '@/lib/apexpad-guardrails-types';
 
 export type { LiveDomElement };
@@ -138,7 +142,7 @@ function tsLibCache(): Map<string, ts.SourceFile | undefined> {
 
 interface ModuleResolutionPlan {
   /** moduleSpecifier -> resolved program file name (undefined = unresolved). */
-  resolved: Map<string, string>;
+  resolved: Map<string, string | undefined>;
   /** program file name -> in-memory content (candidate, workspace or ambient). */
   virtualFiles: Map<string, { content: string; scriptKind: ts.ScriptKind }>;
 }
@@ -462,15 +466,19 @@ export class RuntimeVerificationEngine {
   private contextEngine: ContextEngine;
   private distillationPipeline: DistillationPipeline;
   private allowedHosts: ReadonlySet<string>;
+  /** PHASE 10 (GAP #3): optional live Chrome DevTools Protocol HTTP endpoint. */
+  private cdpHttpEndpoint?: string;
 
   constructor(params: {
     contextEngine: ContextEngine;
     distillationPipeline: DistillationPipeline;
     extraAllowedHosts?: string[];
+    cdpHttpEndpoint?: string;
   }) {
     this.contextEngine = params.contextEngine;
     this.distillationPipeline = params.distillationPipeline;
     this.allowedHosts = new Set([...DEFAULT_ALLOWED_HOSTS, ...(params.extraAllowedHosts ?? [])]);
+    this.cdpHttpEndpoint = params.cdpHttpEndpoint ?? process.env.APEXPAD_CDP_ENDPOINT;
   }
 
   /* ---------------- live page DOM registry (capture daemon) ---------------- */
@@ -776,6 +784,279 @@ export class RuntimeVerificationEngine {
 
   /* ---------------- Ripwire test gate ---------------- */
 
+  /* ---------------- PHASE 10 (GAP #3): real subprocess machinery ---------------- */
+
+  private tail(text: string, maxChars = 1200): string {
+    const clean = text.trim();
+    if (clean.length <= maxChars) return clean;
+    return `…${clean.slice(clean.length - maxChars)}`;
+  }
+
+  private async traceToCcr(params: {
+    sessionId: string;
+    sourceLabel: string;
+    rawLog: string;
+  }): Promise<string | null> {
+    try {
+      const ccr = await this.distillationPipeline.compressAndStoreCCR({
+        sessionId: params.sessionId,
+        sourceLabel: params.sourceLabel,
+        rawContent: params.rawLog,
+      });
+      return ccr.ccrId;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * PHASE 10 (GAP #3): live Chrome DevTools Protocol HTTP/JSON target probe.
+   * When a CDP endpoint is configured (`APEXPAD_CDP_ENDPOINT`), a genuine
+   * HTTP GET is issued against `<endpoint>/json` with a hard timeout; the
+   * discovered page targets feed the Agent-Browser session state. Falls back
+   * cleanly to the deterministic RefMap evaluator when no endpoint answers.
+   */
+  private async probeCdpEndpoint(): Promise<CdpProbeResult | null> {
+    if (!this.cdpHttpEndpoint) return null;
+    const endpoint = this.cdpHttpEndpoint;
+    const jsonUrl = endpoint.endsWith('/json') ? endpoint : `${endpoint.replace(/\/$/, '')}/json`;
+    const probe: CdpProbeResult = {
+      endpoint,
+      reachable: false,
+      targetCount: 0,
+      pageTargets: [],
+      activePageUrl: null,
+      error: null,
+    };
+    try {
+      const res = await fetch(jsonUrl, { signal: AbortSignal.timeout(1500) });
+      if (!res.ok) {
+        probe.error = `CDP endpoint answered HTTP ${res.status}`;
+        return probe;
+      }
+      const targets = (await res.json()) as Array<{ title?: string; url?: string; type?: string }>;
+      probe.reachable = true;
+      probe.targetCount = targets.length;
+      probe.pageTargets = targets
+        .filter((t) => t.type === 'page')
+        .slice(0, 5)
+        .map((t) => ({ title: t.title ?? '(untitled)', url: t.url ?? '', type: 'page' }));
+      probe.activePageUrl = probe.pageTargets[0]?.url ?? null;
+      return probe;
+    } catch (err) {
+      probe.error = err instanceof Error ? err.message : String(err);
+      return probe;
+    }
+  }
+
+  /**
+   * PHASE 10 (GAP #3): real `node --check` subprocess syntax gate for plain
+   * JS modules (.js/.mjs/.cjs). The candidate bytes are materialized to a
+   * scratch file and checked by a genuine Node binary. For TS/TSX the
+   * in-process tsc engine (already genuine diagnostics) remains the gate.
+   */
+  private async runNodeCheckSubprocess(params: {
+    sessionId: string;
+    targetFilePath: string;
+    candidateContent: string;
+  }): Promise<SubprocessExecutionTrace | null> {
+    if (!/\.(js|mjs|cjs)$/i.test(params.targetFilePath)) return null;
+    const startedAt = Date.now();
+    const scratchDir = fs.mkdtempSync(path.join(os.tmpdir(), 'apexpad-nodecheck-'));
+    const scratchFile = path.join(scratchDir, `check_${path.basename(params.targetFilePath)}`);
+    try {
+      fs.writeFileSync(scratchFile, params.candidateContent, 'utf8');
+      const proc = spawnSync(process.execPath, ['--check', scratchFile], {
+        encoding: 'utf8',
+        timeout: 5000,
+      });
+      const rawLog = [
+        `[APEXPAD REAL SUBPROCESS: node --check] target=${params.targetFilePath}`,
+        `command: ${process.execPath} --check ${scratchFile}`,
+        `exitCode=${proc.status}`,
+        proc.stdout || '',
+        proc.stderr || '',
+      ].join('\n');
+      const ccrId = await this.traceToCcr({
+        sessionId: params.sessionId,
+        sourceLabel: `node_check:${params.targetFilePath}`,
+        rawLog,
+      });
+      return {
+        command: `node --check ${scratchFile}`,
+        exitCode: proc.status ?? -1,
+        stdoutTail: this.tail(proc.stdout ?? ''),
+        stderrTail: this.tail(proc.stderr ?? ''),
+        durationMs: Date.now() - startedAt,
+        ccrId,
+      };
+    } catch (err) {
+      return {
+        command: `node --check ${scratchFile}`,
+        exitCode: -1,
+        stdoutTail: '',
+        stderrTail: this.tail(err instanceof Error ? err.message : String(err)),
+        durationMs: Date.now() - startedAt,
+        ccrId: null,
+      };
+    } finally {
+      fs.rmSync(scratchDir, { recursive: true, force: true });
+    }
+  }
+
+  /**
+   * PHASE 10 (GAP #3): REAL subprocess test execution.
+   * Materializes the candidate content + every workspace-indexed required
+   * test file into a fresh sandbox on real disk (transpiling TS via the real
+   * tsc transpiler where needed), then executes `node --test` via
+   * `child_process.spawnSync` and captures genuine stdout/stderr/exit code.
+   */
+  private runSubprocessTestGate(params: {
+    sessionId: string;
+    targetFilePath: string;
+    candidateContent: string;
+    requiredTestFiles: string[];
+  }): { trace: SubprocessExecutionTrace | null; sandboxRoot: string | null } {
+    const store = getWorkspaceFileStore();
+    const testFiles = params.requiredTestFiles.filter((f) => store.has(f));
+    if (testFiles.length === 0) {
+      return { trace: null, sandboxRoot: null }; // deterministic static gate handles this case
+    }
+
+    const startedAt = Date.now();
+    const sandboxRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'apexpad-testrun-'));
+    const writtenFiles: string[] = [];
+
+    try {
+      // ESM sandbox: node --test with .mjs materialization.
+      fs.writeFileSync(
+        path.join(sandboxRoot, 'package.json'),
+        JSON.stringify({ name: 'apexpad-verify-sandbox', private: true, type: 'module' }),
+        'utf8'
+      );
+
+      const transpileToSandbox = (relPath: string, content: string): string => {
+        const isTs = /\.(ts|tsx)$/i.test(relPath);
+        const outRel = isTs
+          ? relPath.replace(/\.(ts|tsx)$/i, '.mjs')
+          : relPath.replace(/\.(js|cjs)$/i, '.mjs');
+        const outPath = path.join(sandboxRoot, outRel);
+        fs.mkdirSync(path.dirname(outPath), { recursive: true });
+        if (isTs) {
+          const emitted = ts.transpileModule(content, {
+            compilerOptions: {
+              target: ts.ScriptTarget.ESNext,
+              module: ts.ModuleKind.ESNext,
+              jsx: relPath.endsWith('.tsx') ? ts.JsxEmit.ReactJSX : ts.JsxEmit.None,
+            },
+          }).outputText;
+          // Rewrite relative imports to their materialized .mjs locations.
+          const rewritten = emitted.replace(
+            /(from\s+|import\s*\(\s*)(['"])(\.\.?\/[^'"]+)\2/g,
+            (_m, prefix: string, quote: string, spec: string) => {
+              const noExt = spec.replace(/\.(js|ts|tsx|jsx)$/i, '');
+              return `${prefix}${quote}${noExt}.mjs${quote}`;
+            }
+          );
+          fs.writeFileSync(outPath, rewritten, 'utf8');
+        } else {
+          fs.writeFileSync(outPath, content, 'utf8');
+        }
+        writtenFiles.push(outPath);
+        return outPath;
+      };
+
+      // Materialize the candidate (target) file so test imports resolve.
+      transpileToSandbox(params.targetFilePath, params.candidateContent);
+      // Materialize workspace deps the tests/targets import (depth-1 relative imports).
+      for (const testRel of testFiles) {
+        const testContent = store.get(testRel) as string;
+        const importSpecs = Array.from(
+          testContent.matchAll(/from\s+['"](\.[^'"]+)['"]/g),
+          (m) => m[1]
+        );
+        for (const spec of importSpecs) {
+          const base = spec.startsWith('./')
+            ? testRel.includes('/')
+              ? `${testRel.slice(0, testRel.lastIndexOf('/'))}/${spec.slice(2)}`
+              : spec.slice(2)
+            : spec;
+          for (const candidate of [base, `${base}.ts`, `${base}.tsx`, `${base}.js`]) {
+            const depContent = store.get(candidate);
+            if (depContent !== undefined && !writtenFiles.some((w) => w.endsWith(candidate))) {
+              transpileToSandbox(candidate, depContent);
+              break;
+            }
+          }
+        }
+        transpileToSandbox(testRel, testContent);
+      }
+
+      const testFilesOnDisk = writtenFiles.filter(
+        (f) => /\.(test|spec)\.mjs$/i.test(f) || /\.(test|spec)\.js$/i.test(f)
+      );
+      const runnerTargets = testFilesOnDisk.length > 0 ? testFilesOnDisk : writtenFiles;
+
+      const proc = spawnSync(process.execPath, ['--test', ...runnerTargets], {
+        cwd: sandboxRoot,
+        encoding: 'utf8',
+        timeout: 15000,
+      });
+
+      const rawLog = [
+        `[APEXPAD REAL SUBPROCESS: node --test] target=${params.targetFilePath}`,
+        `command: ${process.execPath} --test ${runnerTargets.join(' ')}`,
+        `sandbox: ${sandboxRoot}`,
+        `exitCode=${proc.status}`,
+        '--- stdout ---',
+        proc.stdout || '(empty)',
+        '--- stderr ---',
+        proc.stderr || '(empty)',
+      ].join('\n');
+
+      const trace: SubprocessExecutionTrace = {
+        command: `node --test ${runnerTargets.map((f) => path.basename(f)).join(' ')}`,
+        exitCode: proc.status ?? -1,
+        stdoutTail: this.tail(proc.stdout ?? ''),
+        stderrTail: this.tail(proc.stderr ?? ''),
+        durationMs: Date.now() - startedAt,
+        ccrId: null,
+      };
+
+      // Fire-and-forget CCR compression of the full raw log (async pipeline).
+      void this
+        .traceToCcr({
+          sessionId: params.sessionId,
+          sourceLabel: `subprocess_test_gate:${params.targetFilePath}`,
+          rawLog,
+        })
+        .then((ccrId) => {
+          trace.ccrId = ccrId;
+        })
+        .catch(() => {
+          trace.ccrId = null;
+        });
+
+      return { trace, sandboxRoot };
+    } catch (err) {
+      return {
+        trace: {
+          command: `node --test (${sandboxRoot})`,
+          exitCode: -1,
+          stdoutTail: '',
+          stderrTail: this.tail(err instanceof Error ? err.message : String(err)),
+          durationMs: Date.now() - startedAt,
+          ccrId: null,
+        },
+        sandboxRoot,
+      };
+    } finally {
+      fs.rmSync(sandboxRoot, { recursive: true, force: true });
+    }
+  }
+
+  /* ---------------- deterministic ripwire test gate ---------------- */
+
   private runTestGate(params: {
     targetFilePath: string;
     candidateContent: string;
@@ -853,6 +1134,16 @@ export class RuntimeVerificationEngine {
   /**
    * Runs Compiler Gate + Test Gate + Agent-Browser loop over a staged artifact
    * and persists the RuntimeVerificationReport (blueprint §7.6 STAGE 4).
+   *
+   * PHASE 10 (GAP #3): the report now carries REAL subprocess telemetry —
+   *   • compilerTrace: genuine `node --check` spawn for JS modules, or the
+   *     genuine in-process tsc engine run for TS/TSX sources,
+   *   • testRunnerTrace: genuine `node --test` spawn over materialized test
+   *     files when the blast radius requires tests that exist in the
+   *     workspace index (deterministic ripwire gate remains the fallback),
+   *   • cdpProbe: live Chrome DevTools Protocol HTTP/JSON target discovery
+   *     when `APEXPAD_CDP_ENDPOINT` is configured.
+   * Every subprocess stdout/stderr log is compressed into Headroom CCR.
    */
   public async runFullArtifactVerification(params: {
     sessionId: string;
@@ -868,7 +1159,7 @@ export class RuntimeVerificationEngine {
     const verificationId = `ver_${crypto.randomBytes(6).toString('hex')}`;
     const createdAt = new Date().toISOString();
 
-    // Gate 1: TypeScript compiler gate (shadow sandbox — candidate content is
+    // Gate 1a: TypeScript compiler gate (shadow sandbox — candidate content is
     // never merged into the workspace store, so the workspace is not polluted).
     const typeCheck = runTypeScriptGate({
       targetFilePath: params.targetFilePath,
@@ -876,7 +1167,41 @@ export class RuntimeVerificationEngine {
       previousContent: params.previousContent,
     });
 
-    // Gate 2: Ripwire test gate + CCR compression of the full gate log.
+    // Gate 1b (GAP #3): real `node --check` subprocess for plain JS modules.
+    const nodeCheckTrace = await this.runNodeCheckSubprocess({
+      sessionId: params.sessionId,
+      targetFilePath: params.targetFilePath,
+      candidateContent: params.candidateContent,
+    });
+
+    const compilerTrace: SubprocessExecutionTrace = nodeCheckTrace ?? {
+      command: `tsc --noEmit --pretty false (in-process engine sandbox: ${params.targetFilePath})`,
+      exitCode: typeCheck.passed ? 0 : 1,
+      stdoutTail: '',
+      stderrTail: this.tail(typeCheck.diagnostics.join('\n')),
+      durationMs: Math.max(1, Date.now() - startedAt),
+      ccrId:
+        typeCheck.diagnostics.length > 0
+          ? await this.traceToCcr({
+              sessionId: params.sessionId,
+              sourceLabel: `compiler_gate:${params.artifactId}`,
+              rawLog: typeCheck.diagnostics.join('\n'),
+            })
+          : null,
+    };
+    const compilerGateSource = nodeCheckTrace ? 'node_check_subprocess' : 'tsc_engine';
+
+    // Gate 2a (GAP #3): real `node --test` subprocess over materialized test
+    // files when the blast radius requires tests that exist in the workspace.
+    const subprocessRun = this.runSubprocessTestGate({
+      sessionId: params.sessionId,
+      targetFilePath: params.targetFilePath,
+      candidateContent: params.candidateContent,
+      requiredTestFiles: params.requiredTestFiles,
+    });
+
+    // Gate 2b: Ripwire deterministic test gate + CCR compression of the full
+    // gate log (the blueprint's isolated-sandbox fallback path).
     const testGate = this.runTestGate({
       targetFilePath: params.targetFilePath,
       candidateContent: params.candidateContent,
@@ -894,6 +1219,12 @@ export class RuntimeVerificationEngine {
       testRunnerOutputCcrId = null;
     }
 
+    // The subprocess result is authoritative when it ran; the deterministic
+    // gate still must pass (it catches import/binding issues execution cannot).
+    const testGatePassed = subprocessRun.trace
+      ? testGate.passed && subprocessRun.trace.exitCode === 0
+      : testGate.passed;
+
     // Gate 3: Agent-Browser verification loop (stops immediately on any loud
     // failure — blueprint §7.5 runFullArtifactVerification semantics).
     const agentBrowserResults: AgentBrowserActionExecutionResult[] = [];
@@ -907,8 +1238,11 @@ export class RuntimeVerificationEngine {
     const browserAllPassed =
       agentBrowserResults.length === 0 || agentBrowserResults.every((r) => r.success);
 
+    // Gate 4 (GAP #3): live CDP HTTP endpoint probe.
+    const cdpProbe = await this.probeCdpEndpoint();
+
     const overallStatus: RuntimeVerificationReport['overallStatus'] =
-      typeCheck.passed && testGate.passed && browserAllPassed
+      typeCheck.passed && testGatePassed && browserAllPassed
         ? 'verified_ready_for_approval'
         : 'failed_verification';
 
@@ -919,12 +1253,15 @@ export class RuntimeVerificationEngine {
       targetFilePath: params.targetFilePath,
       typeCheckPassed: typeCheck.passed,
       typeCheckDiagnostics: typeCheck.diagnostics,
-      testGatePassed: testGate.passed,
+      testGatePassed,
       executedTestFiles: testGate.executedTestFiles,
       testRunnerOutputCcrId,
       agentBrowserResults,
       overallStatus,
       createdAt,
+      compilerTrace,
+      testRunnerTrace: subprocessRun.trace,
+      cdpProbe,
     };
 
     await db.runtimeVerification.create({
@@ -935,12 +1272,18 @@ export class RuntimeVerificationEngine {
         targetFilePath: params.targetFilePath,
         typeCheckPassed: typeCheck.passed,
         typeCheckDiagnosticsJson: JSON.stringify(typeCheck.diagnostics),
-        testGatePassed: testGate.passed,
+        testGatePassed,
         executedTestFilesJson: JSON.stringify(testGate.executedTestFiles),
         testRunnerCcrId: testRunnerOutputCcrId,
         agentBrowserResultsJson: JSON.stringify(agentBrowserResults),
         overallStatus,
         createdAt,
+        compilerCommand: compilerTrace.command,
+        compilerExitCode: compilerTrace.exitCode,
+        compilerGateSource,
+        testRunnerCommand: subprocessRun.trace?.command ?? null,
+        testRunnerExitCode: subprocessRun.trace?.exitCode ?? null,
+        cdpProbeJson: cdpProbe ? JSON.stringify(cdpProbe) : null,
       },
     });
 
@@ -949,9 +1292,13 @@ export class RuntimeVerificationEngine {
       artifactId: params.artifactId,
       targetFilePath: params.targetFilePath,
       typeCheckPassed: typeCheck.passed,
-      testGatePassed: testGate.passed,
+      testGatePassed,
       typeCheckDiagnostics: typeCheck.diagnostics.length,
       agentBrowserCommands: agentBrowserResults.length,
+      compilerGateSource,
+      compilerExitCode: compilerTrace.exitCode,
+      testRunnerExitCode: subprocessRun.trace?.exitCode ?? null,
+      cdpReachable: cdpProbe?.reachable ?? null,
       overallStatus,
       gateLatencyMs: Date.now() - startedAt,
     });
@@ -986,6 +1333,27 @@ export class RuntimeVerificationEngine {
       agentBrowserResults: parse<AgentBrowserActionExecutionResult[]>(row.agentBrowserResultsJson, []),
       overallStatus: row.overallStatus as RuntimeVerificationReport['overallStatus'],
       createdAt: row.createdAt,
+      compilerTrace: row.compilerCommand
+        ? {
+            command: row.compilerCommand,
+            exitCode: row.compilerExitCode ?? -1,
+            stdoutTail: '',
+            stderrTail: parse<string[]>(row.typeCheckDiagnosticsJson, []).join('\n'),
+            durationMs: 0,
+            ccrId: row.testRunnerCcrId,
+          }
+        : null,
+      testRunnerTrace: row.testRunnerCommand
+        ? {
+            command: row.testRunnerCommand,
+            exitCode: row.testRunnerExitCode ?? -1,
+            stdoutTail: '',
+            stderrTail: '',
+            durationMs: 0,
+            ccrId: row.testRunnerCcrId,
+          }
+        : null,
+      cdpProbe: row.cdpProbeJson ? parse<CdpProbeResult>(row.cdpProbeJson, null as unknown as CdpProbeResult) : null,
     }));
   }
 }

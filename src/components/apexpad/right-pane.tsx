@@ -8,12 +8,14 @@ import * as React from 'react'
 import { AnimatePresence } from 'framer-motion'
 import {
   ArrowDown,
+  Ban,
   Bot,
   CheckCircle2,
   FileCode,
   FileDiff,
   FileText,
   GitBranch,
+  HardDrive,
   Layers,
   Loader2,
   MessageSquare,
@@ -26,6 +28,7 @@ import {
   ShieldCheck,
   Square,
   TriangleAlert,
+  Undo2,
   Wrench,
 } from 'lucide-react'
 
@@ -36,10 +39,13 @@ import type {
 import type {
   CaptureEventType,
   DagExecutionState,
+  DiskCommitRecord,
+  DiskRollbackReceipt,
   PackedContextEnvelope,
   StagedArtifact,
   UnattendedCaptureEvent,
 } from '@/lib/apexpad-types'
+import type { QuarantinedEditSummary } from '@/lib/apexpad-client'
 import { cn } from '@/lib/utils'
 import { formatRelativeTime, truncate } from '@/lib/apexpad-client'
 import { VerificationPanel } from '@/components/apexpad/verification-panel'
@@ -71,6 +77,14 @@ const EVENT_ICON: Record<CaptureEventType, { icon: React.ReactNode; color: strin
   'agent:turn_complete': { icon: <Bot className="h-3 w-3" />, color: 'text-[#7ee787]' },
   'dag:staged': { icon: <GitBranch className="h-3 w-3" />, color: 'text-[#d2a8ff]' },
   'artifact:resolved': { icon: <CheckCircle2 className="h-3 w-3" />, color: 'text-[#3fb950]' },
+  'artifact:committed': { icon: <HardDrive className="h-3 w-3" />, color: 'text-[#7ee787]' },
+  'artifact:rolled_back': { icon: <Undo2 className="h-3 w-3" />, color: 'text-[#d29922]' },
+  'quarantine:blocked': { icon: <Ban className="h-3 w-3" />, color: 'text-[#f85149]' },
+  'guardrail:report': { icon: <TriangleAlert className="h-3 w-3" />, color: 'text-[#d29922]' },
+  'verify:report': { icon: <ShieldCheck className="h-3 w-3" />, color: 'text-[#79c0ff]' },
+  'pipeline:complete': { icon: <CheckCircle2 className="h-3 w-3" />, color: 'text-[#7ee787]' },
+  'browser:command': { icon: <Wrench className="h-3 w-3" />, color: 'text-[#d2a8ff]' },
+  'e2e:suite': { icon: <ShieldCheck className="h-3 w-3" />, color: 'text-[#3fb950]' },
 }
 
 function EventFeed({ events }: { events: UnattendedCaptureEvent[] }) {
@@ -174,12 +188,16 @@ function DagTab({
   dagState,
   stagedArtifacts,
   events,
+  diskCommits,
+  quarantinedEdits,
   onReInflateCcr,
 }: {
   envelope: PackedContextEnvelope | null
   dagState: DagExecutionState | null
   stagedArtifacts: StagedArtifact[]
   events: UnattendedCaptureEvent[]
+  diskCommits: DiskCommitRecord[]
+  quarantinedEdits: QuarantinedEditSummary[]
   onReInflateCcr: (ccrId: string) => void
 }) {
   const stagedCount = stagedArtifacts.filter((a) => a.status === 'staged').length
@@ -278,7 +296,54 @@ function DagTab({
             {stagedCount > 0 ? 'awaiting human approval' : 'gate clear'}
           </span>
         </div>
+        <div className="mt-1.5 flex flex-wrap items-center gap-1.5 font-mono text-[9px] text-[#8b949e]">
+          <span className="inline-flex items-center gap-1 text-[#7ee787]">
+            <HardDrive className="h-2.5 w-2.5" />
+            {diskCommits.filter((c) => !c.rolledBack).length} on-disk commit(s)
+          </span>
+          <span className="inline-flex items-center gap-1 text-[#d29922]">
+            <Undo2 className="h-2.5 w-2.5" />
+            {diskCommits.filter((c) => c.rolledBack).length} rolled back
+          </span>
+        </div>
       </DagNode>
+
+      {quarantinedEdits.length > 0 ? (
+        <Panel className="border-[#f85149]/60 bg-[#f85149]/5 p-3">
+          <div className="flex items-center gap-1.5">
+            <Ban className="h-3.5 w-3.5 text-[#f85149]" />
+            <span className="text-[11px] font-bold uppercase tracking-wide text-[#f85149]">
+              Hard Quarantine Gate — {quarantinedEdits.length} edit(s) blocked
+            </span>
+          </div>
+          <div className="mt-2 space-y-2">
+            {quarantinedEdits.slice(0, 5).map((q) => (
+              <div key={q.quarantineId} className="rounded-md border border-[#f85149]/40 bg-[#0d1117] p-2">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="break-all font-mono text-[10px] font-bold text-[#f85149]">
+                    {q.targetFilePath}
+                  </span>
+                  <span className="shrink-0 font-mono text-[9px] text-[#8b949e]">
+                    {formatRelativeTime(q.quarantinedAt)}
+                  </span>
+                </div>
+                <ul className="mt-1 space-y-0.5">
+                  {q.blockingReasons.map((reason, i) => (
+                    <li key={i} className="font-mono text-[9px] leading-relaxed text-[#f85149]/90">
+                      ⚠ {reason}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+            {quarantinedEdits.length > 5 ? (
+              <p className="font-mono text-[9px] text-[#8b949e]">
+                +{quarantinedEdits.length - 5} more quarantined edit(s) — never staged.
+              </p>
+            ) : null}
+          </div>
+        </Panel>
+      ) : null}
 
       <EventFeed events={events} />
     </div>
@@ -601,10 +666,18 @@ function StagingTab({
   stagedArtifacts,
   busyArtifactId,
   onResolveApproval,
+  diskCommits,
+  rollbackReceipts,
+  busyRollbackArtifactId,
+  onRollbackArtifact,
 }: {
   stagedArtifacts: StagedArtifact[]
   busyArtifactId: string | null
   onResolveApproval: (artifactId: string, approved: boolean) => Promise<boolean>
+  diskCommits: DiskCommitRecord[]
+  rollbackReceipts: Record<string, DiskRollbackReceipt>
+  busyRollbackArtifactId: string | null
+  onRollbackArtifact: (artifactId: string) => Promise<boolean>
 }) {
   if (stagedArtifacts.length === 0) {
     return (
@@ -624,6 +697,9 @@ function StagingTab({
       <TinyLabel>Artifact Staging &amp; Human Approval Gate</TinyLabel>
       {stagedArtifacts.map((artifact) => {
         const busy = busyArtifactId === artifact.artifactId
+        const commit = diskCommits.find((c) => c.artifactId === artifact.artifactId)
+        const rollback = rollbackReceipts[artifact.artifactId]
+        const rollbackBusy = busyRollbackArtifactId === artifact.artifactId
         return (
           <FadeIn key={artifact.artifactId}>
             <Panel className="p-3">
@@ -702,6 +778,87 @@ function StagingTab({
                   </button>
                 </div>
               ) : null}
+
+              {/* PHASE 10 (GAP #1): atomic disk commit receipt + 1-click rollback */}
+              {commit && !rollback ? (
+                <div
+                  className={cn(
+                    'mt-2 rounded-md border p-2',
+                    commit.rolledBack
+                      ? 'border-[#d29922]/50 bg-[#d29922]/5'
+                      : 'border-[#2ea043]/50 bg-[#238636]/10',
+                  )}
+                >
+                  <div className="flex items-center gap-1.5">
+                    {commit.rolledBack ? (
+                      <Undo2 className="h-3 w-3 text-[#d29922]" />
+                    ) : (
+                      <HardDrive className="h-3 w-3 text-[#7ee787]" />
+                    )}
+                    <span
+                      className={cn(
+                        'font-mono text-[10px] font-bold uppercase tracking-wide',
+                        commit.rolledBack ? 'text-[#d29922]' : 'text-[#7ee787]',
+                      )}
+                    >
+                      {commit.rolledBack ? 'rolled back' : 'committed to disk'}
+                    </span>
+                  </div>
+                  <div className="mt-1 space-y-0.5 font-mono text-[9px] leading-relaxed text-[#8b949e]">
+                    <p className="break-all">
+                      sha256:{' '}
+                      <span className={commit.rolledBack ? 'text-[#d29922]' : 'text-[#7ee787]'}>
+                        {commit.committedSha256.slice(0, 16)}…
+                      </span>
+                    </p>
+                    <p className="break-all">
+                      path: <span className="text-[#79c0ff]">{commit.absoluteFilePath}</span>
+                    </p>
+                    <p className="break-all">
+                      backup: {commit.backupFilePath ? `.apexpad-backups/${artifact.artifactId}.bak` : 'none (new file)'} •
+                      existed before: {String(commit.existedBeforeCommit)}
+                    </p>
+                    <p>committed: {new Date(commit.committedAt).toLocaleString()}</p>
+                    {commit.rolledBack ? (
+                      <p className="text-[#d29922]">
+                        rolled back {commit.rolledBackAt ? new Date(commit.rolledBackAt).toLocaleString() : ''} —
+                        reason: {commit.rollbackReason ?? '—'}
+                      </p>
+                    ) : null}
+                  </div>
+                  {!commit.rolledBack ? (
+                    <button
+                      type="button"
+                      disabled={rollbackBusy}
+                      onClick={() => void onRollbackArtifact(artifact.artifactId)}
+                      className={cn(
+                        'mt-2 inline-flex min-h-[40px] w-full items-center justify-center gap-1.5 rounded-md border border-[#d29922]/60 bg-[#d29922]/15 px-3 py-2 text-xs font-bold text-[#d29922] transition-colors hover:bg-[#d29922]/25 disabled:opacity-60 lg:min-h-0',
+                      )}
+                    >
+                      {rollbackBusy ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <Undo2 className="h-3.5 w-3.5" />
+                      )}
+                      1-Click Rollback (.bak)
+                    </button>
+                  ) : null}
+                </div>
+              ) : null}
+
+              {rollback ? (
+                <div className="mt-2 rounded-md border border-[#d29922]/50 bg-[#d29922]/10 p-2 font-mono text-[9px] leading-relaxed text-[#d29922]">
+                  <p className="font-bold uppercase">rolled back on disk</p>
+                  <p className="break-all">restored: {rollback.restoredFilePath}</p>
+                  <p>
+                    deleted-because-new: {String(rollback.wasDeletedBecauseNew)} • restored sha:{' '}
+                    {rollback.restoredSha256?.slice(0, 12) ?? '—'}…
+                  </p>
+                  <p className="break-all">
+                    at {new Date(rollback.rolledBackAt).toLocaleTimeString()} — {rollback.reason}
+                  </p>
+                </div>
+              ) : null}
             </Panel>
           </FadeIn>
         )
@@ -727,6 +884,11 @@ export function RightPane({
   onResolveApproval,
   busyArtifactId,
   onRefreshTelemetry,
+  diskCommits,
+  quarantinedEdits,
+  rollbackReceipts,
+  busyRollbackArtifactId,
+  onRollbackArtifact,
 }: {
   envelope: PackedContextEnvelope | null
   dagState: DagExecutionState | null
@@ -740,6 +902,14 @@ export function RightPane({
   onResolveApproval: (artifactId: string, approved: boolean) => Promise<boolean>
   busyArtifactId: string | null
   onRefreshTelemetry: () => void
+  /** PHASE 10 (GAP #1): atomic disk commit ledger. */
+  diskCommits: DiskCommitRecord[]
+  /** PHASE 10 (GAP #2): hard-quarantined candidate edits. */
+  quarantinedEdits: QuarantinedEditSummary[]
+  /** PHASE 10 (GAP #1): rollback receipts keyed by artifact id. */
+  rollbackReceipts: Record<string, DiskRollbackReceipt>
+  busyRollbackArtifactId: string | null
+  onRollbackArtifact: (artifactId: string) => Promise<boolean>
 }) {
   const tabs: { id: RightPaneTab; label: string; count?: number }[] = [
     { id: 'dag', label: 'DAG' },
@@ -782,6 +952,8 @@ export function RightPane({
               dagState={dagState}
               stagedArtifacts={stagedArtifacts}
               events={events}
+              diskCommits={diskCommits}
+              quarantinedEdits={quarantinedEdits}
               onReInflateCcr={onReInflateCcr}
             />
           </FadeIn>
@@ -802,6 +974,10 @@ export function RightPane({
               stagedArtifacts={stagedArtifacts}
               busyArtifactId={busyArtifactId}
               onResolveApproval={onResolveApproval}
+              diskCommits={diskCommits}
+              rollbackReceipts={rollbackReceipts}
+              busyRollbackArtifactId={busyRollbackArtifactId}
+              onRollbackArtifact={onRollbackArtifact}
             />
           </FadeIn>
         ) : null}

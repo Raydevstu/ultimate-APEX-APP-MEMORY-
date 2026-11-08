@@ -299,7 +299,7 @@ export function extractTopLevelSymbols(
     ) {
       if (statement.name) pushSymbol(statement.name.text, statement);
     } else if (ts.isVariableStatement(statement)) {
-      const isExported = statement.modifiers.some(
+      const isExported = (statement.modifiers ?? []).some(
         (mod) => mod.kind === ts.SyntaxKind.ExportKeyword
       );
       if (!isExported) continue;

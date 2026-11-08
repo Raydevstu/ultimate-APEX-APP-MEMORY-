@@ -26,11 +26,15 @@
  */
 
 import crypto from 'crypto';
+import fs from 'fs';
 import { db } from '@/lib/db';
 import { publishCaptureEvent } from './event-bus';
 import { MemoryRouter } from './memory-router';
 import { DistillationPipeline } from './distillation-pipeline';
 import { ContextEngine } from './context-engine';
+import { ApexDagOrchestrator } from './dag-orchestrator';
+import { FullApexSystemPipeline } from './full-pipeline';
+import { resolveSafeWorkspacePath } from './workspace';
 import { SpecificationStructurer } from './spec-structurer';
 import { ModelGenerationGuardrails } from './guardrails';
 import { RuntimeVerificationEngine } from './runtime-verifier';
@@ -67,6 +71,8 @@ export class ApexE2eVerificationSuite {
   private specStructurer: SpecificationStructurer;
   private codeGuardrails: ModelGenerationGuardrails;
   private runtimeVerifier: RuntimeVerificationEngine;
+  private dagOrchestrator: ApexDagOrchestrator;
+  private fullPipeline: FullApexSystemPipeline | null;
 
   constructor(params: {
     memoryRouter: MemoryRouter;
@@ -75,6 +81,8 @@ export class ApexE2eVerificationSuite {
     specStructurer: SpecificationStructurer;
     codeGuardrails: ModelGenerationGuardrails;
     runtimeVerifier: RuntimeVerificationEngine;
+    dagOrchestrator?: ApexDagOrchestrator;
+    fullPipeline?: FullApexSystemPipeline;
   }) {
     this.memoryRouter = params.memoryRouter;
     this.contextEngine = params.contextEngine;
@@ -82,6 +90,8 @@ export class ApexE2eVerificationSuite {
     this.specStructurer = params.specStructurer;
     this.codeGuardrails = params.codeGuardrails;
     this.runtimeVerifier = params.runtimeVerifier;
+    this.dagOrchestrator = params.dagOrchestrator as ApexDagOrchestrator;
+    this.fullPipeline = params.fullPipeline ?? null;
   }
 
   public async runFullSuite(): Promise<E2eSuiteRunReport> {
@@ -91,8 +101,11 @@ export class ApexE2eVerificationSuite {
 
     const scenarios: E2eScenarioReport[] = [];
     scenarios.push(await this.runScenario1SpecStructurer(runId));
-    scenarios.push(await this.runScenario2Guardrails(runId));
-    scenarios.push(await this.runScenario3AgentBrowser(runId));
+    scenarios.push(await this.runScenario2Guardrails());
+    scenarios.push(await this.runScenario3AgentBrowser());
+    if (this.dagOrchestrator && this.fullPipeline) {
+      scenarios.push(await this.runScenario4ProductionWiring());
+    }
 
     const report: E2eSuiteRunReport = {
       runId,
@@ -111,7 +124,7 @@ export class ApexE2eVerificationSuite {
         scope: 'repo',
         category: 'tool_trace',
         title: `E2E verification suite run ${runId}: ${report.allPassed ? 'ALL GREEN' : 'FAILURES PRESENT'}`,
-        subtitle: `3 scenarios / ${report.scenarios.reduce((n, s) => n + s.assertions.length, 0)} assertions in ${report.durationMs}ms`,
+        subtitle: `${scenarios.length} scenarios / ${report.scenarios.reduce((n, s) => n + s.assertions.length, 0)} assertions in ${report.durationMs}ms`,
         narrative: scenarios
           .map(
             (s) =>
@@ -481,6 +494,205 @@ export class ApexE2eVerificationSuite {
     return {
       scenarioId: 'scenario3_task4_agent_browser',
       title: '[Task 4] Agent-Browser snapshot -> @e1 RefMap loop with loud failures + CSPRNG boundaries',
+      passed: assertions.every((a) => a.passed),
+      assertions,
+      durationMs: Date.now() - start,
+    };
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Scenario 4 — PHASE 10: production wiring (GAPs #1 + #2)             */
+  /* ------------------------------------------------------------------ */
+
+  /**
+   * Proves the Phase 10 wiring against REAL disk + engine state:
+   *   GAP #1 — approving a staged artifact atomically writes the proposed
+   *     bytes to the workspace, snapshots the pre-commit state into
+   *     `.apexpad-backups/<id>.bak`, records the SHA-256 ledger row, and a
+   *     1-click rollback restores the exact original bytes (or deletes a
+   *     newly-created file).
+   *   GAP #2 — the strict quarantine gate HARD-BLOCKS a candidate edit
+   *     carrying a hallucinated import + lazy truncation placeholder: it is
+   *     persisted to `quarantined_edits` and never reaches Artifact Staging.
+   */
+  private async runScenario4ProductionWiring(): Promise<E2eScenarioReport> {
+    const start = Date.now();
+    const sessionId = `sess_e2e_p10_${crypto.randomBytes(3).toString('hex')}`;
+    const assertions: E2eAssertion[] = [];
+
+    const relPath = `e2e/p10/chargeCard_${crypto.randomBytes(3).toString('hex')}.ts`;
+    const originalDiskContent = [
+      `export function chargeCard(amount: number): boolean {`,
+      `  if (amount <= 0) throw new Error('Invalid amount');`,
+      `  return true;`,
+      `}`,
+    ].join('\n');
+    const proposedDiskContent = [
+      `export function chargeCard(amount: number): boolean {`,
+      `  if (amount <= 0) throw new Error('Invalid amount');`,
+      `  if (amount > 100000) throw new Error('Limit exceeded');`,
+      `  return true;`,
+      `}`,
+    ].join('\n');
+
+    try {
+      await this.memoryRouter.startSession({
+        sessionId,
+        projectSlug: E2E_SUITE_PROJECT_SLUG,
+        branchName: 'main',
+        firstPrompt: 'Phase 10 production wiring verification',
+      });
+
+      // Pre-seed the workspace file so the commit has a real pre-state to back up.
+      const absPath = resolveSafeWorkspacePath(relPath);
+      fs.mkdirSync(absPath.slice(0, absPath.lastIndexOf('/')), { recursive: true });
+      fs.writeFileSync(absPath, originalDiskContent, 'utf8');
+
+      // ---- GAP #1: stage -> approve -> verify disk + .bak + ledger ----
+      const dagState = await this.dagOrchestrator.executeDagUpToStaging({
+        sessionId,
+        projectSlug: E2E_SUITE_PROJECT_SLUG,
+        userGoal: 'Add upper limit validation to chargeCard',
+        tokenBudgetCeiling: 4000,
+        candidateEdits: [
+          {
+            targetFilePath: relPath,
+            previousContent: originalDiskContent,
+            proposedContent: proposedDiskContent,
+          },
+        ],
+      });
+      const artifact = dagState.stagedArtifacts[0];
+      assertions.push({
+        name: 'clean candidate edit staged for human approval',
+        passed: Boolean(artifact) && artifact.status === 'staged',
+        evidence: artifact
+          ? `artifactId=${artifact.artifactId} target=${artifact.targetFilePath}`
+          : 'no staged artifact returned',
+      });
+
+      const beforeApproval = fs.readFileSync(absPath, 'utf8');
+      assertions.push({
+        name: 'disk untouched before human approval (gate holds)',
+        passed: beforeApproval === originalDiskContent,
+        evidence: `disk bytes still original=${beforeApproval === originalDiskContent}`,
+      });
+
+      const approval = await this.dagOrchestrator.resolveHumanApproval({
+        artifactId: artifact.artifactId,
+        projectSlug: E2E_SUITE_PROJECT_SLUG,
+        approved: true,
+        reviewerNote: 'Phase 10 wiring verification',
+      });
+      const receipt = approval.diskReceipt;
+      const afterApproval = fs.readFileSync(absPath, 'utf8');
+      const expectedSha = crypto.createHash('sha256').update(proposedDiskContent, 'utf8').digest('hex');
+
+      assertions.push(
+        {
+          name: 'approval atomically wrote proposed bytes to the workspace',
+          passed: receipt !== undefined && afterApproval === proposedDiskContent,
+          evidence: receipt
+            ? `sha256=${receipt.committedSha256.slice(0, 12)}… backup=${receipt.backupFilePath ? 'yes' : 'no'} existedBefore=${receipt.existedBeforeCommit}`
+            : 'no disk receipt returned',
+        },
+        {
+          name: 'committed SHA-256 matches the exact on-disk bytes',
+          passed: receipt?.committedSha256 === expectedSha,
+          evidence: `expected=${expectedSha.slice(0, 12)}… actual=${receipt?.committedSha256.slice(0, 12) ?? '—'}…`,
+        },
+        {
+          name: 'pre-commit `.bak` snapshot exists on disk',
+          passed: Boolean(receipt?.backupFilePath) && fs.existsSync(receipt?.backupFilePath ?? ''),
+          evidence: `backupFilePath=${receipt?.backupFilePath ?? 'none'}`,
+        }
+      );
+
+      // ---- GAP #1: 1-click rollback restores exact original bytes ----
+      const rollback = await this.dagOrchestrator.rollbackCommittedArtifact({
+        artifactId: artifact.artifactId,
+        reason: 'Phase 10 deterministic rollback verification',
+        projectSlug: E2E_SUITE_PROJECT_SLUG,
+      });
+      const afterRollback = fs.readFileSync(absPath, 'utf8');
+      const ledgerRow = await db.artifactDiskCommit.findUnique({
+        where: { artifactId: artifact.artifactId },
+      });
+
+      assertions.push(
+        {
+          name: '1-click rollback restored the exact original bytes from .bak',
+          passed: afterRollback === originalDiskContent && rollback.restoredSha256 !== null,
+          evidence: `restoredSha256=${rollback.restoredSha256?.slice(0, 12) ?? '—'}… wasDeletedBecauseNew=${rollback.wasDeletedBecauseNew}`,
+        },
+        {
+          name: 'disk-commit ledger row marked rolled back',
+          passed: ledgerRow?.rolledBack === true && ledgerRow.rollbackReason !== null,
+          evidence: `rolledBack=${ledgerRow?.rolledBack} reason=${ledgerRow?.rollbackReason ?? '—'}`,
+        }
+      );
+
+      // ---- GAP #2: strict quarantine gate blocks the flawed edit ----
+      const flawedResult = await this.fullPipeline!.executeFullPipeline({
+        sessionId,
+        projectSlug: E2E_SUITE_PROJECT_SLUG,
+        rawUserPrompt: 'Update the session cache module',
+        tokenBudgetCeiling: 4000,
+        candidateEdits: [
+          {
+            targetFilePath: 'src/cache/sessionCache.ts',
+            previousContent: `export function getSession(id: string): string | null {\n  return id ? \`session:\${id}\` : null;\n}\n`,
+            proposedContent: [
+              `import { redisCluster } from '@nonexistent-hallucinated/redis-fleet';`,
+              ``,
+              `export function getSession(id: string): string | null {`,
+              `  return id ? \`session:\${id}\` : null;`,
+              `}`,
+              ``,
+              `export function invalidateAllSessions(): void {`,
+              // A bare (nonstandard) truncation marker the AST splicer does NOT
+              // recognize — proving the quarantine gate blocks what the healer
+              // cannot heal (blueprint GAP #2 blocking-reason contract).
+              `... rest of existing code remains unchanged ...`,
+              `}`,
+            ].join('\n'),
+          },
+        ],
+        strictQuarantineGate: true,
+      });
+
+      const reasons = flawedResult.quarantinedEdits[0]?.blockingReasons.join(' | ') ?? '';
+      assertions.push(
+        {
+          name: 'quarantine gate hard-blocked the flawed edit before staging',
+          passed:
+            flawedResult.pipelineBlockedByQuarantine === true &&
+            flawedResult.quarantinedEdits.length === 1 &&
+            flawedResult.dagState.stagedArtifacts.length === 0,
+          evidence: `blocked=${flawedResult.pipelineBlockedByQuarantine} quarantined=${flawedResult.quarantinedEdits.length} staged=${flawedResult.dagState.stagedArtifacts.length} currentNode=${flawedResult.dagState.currentNode}`,
+        },
+        {
+          name: 'blocking reasons name the hallucinated import',
+          passed: reasons.includes('@nonexistent-hallucinated/redis-fleet'),
+          evidence: reasons || 'no blocking reasons recorded',
+        },
+        {
+          name: 'blocking reasons name the unhealed truncation placeholder',
+          passed: reasons.toLowerCase().includes('truncation'),
+          evidence: reasons || 'no blocking reasons recorded',
+        }
+      );
+    } catch (err) {
+      assertions.push({
+        name: 'scenario execution completed without engine error',
+        passed: false,
+        evidence: err instanceof Error ? err.message : String(err),
+      });
+    }
+
+    return {
+      scenarioId: 'scenario4_phase10_production_wiring',
+      title: '[Phase 10] Atomic disk commit + .bak rollback + hard quarantine gate',
       passed: assertions.every((a) => a.passed),
       assertions,
       durationMs: Date.now() - start,

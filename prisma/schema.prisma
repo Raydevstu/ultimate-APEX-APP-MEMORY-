@@ -247,7 +247,60 @@ model RuntimeVerification {
   overallStatus           String  @map("overall_status") // verified_ready_for_approval | failed_verification (validated in app layer)
   createdAt               String  @map("created_at")
 
+  // PHASE 10 (GAP #3): real subprocess + CDP telemetry.
+  // compilerCommand/compilerExitCode record the genuine `node --check` /
+  // `tsc` engine run; testRunnerCommand/testRunnerExitCode record the genuine
+  // `node --test` subprocess executed against materialized test files.
+  compilerCommand         String? @map("compiler_command")
+  compilerExitCode        Int?    @map("compiler_exit_code")
+  compilerGateSource      String? @map("compiler_gate_source") // tsc_engine | node_check_subprocess
+  testRunnerCommand       String? @map("test_runner_command")
+  testRunnerExitCode      Int?    @map("test_runner_exit_code")
+  cdpProbeJson            String? @map("cdp_probe_json")
+
   @@index([sessionId, createdAt], map: "idx_verify_session")
   @@index([artifactId], map: "idx_verify_artifact")
   @@map("runtime_verifications")
+}
+
+// 15. PHASE 10 (GAP #1): ATOMIC DISK COMMIT RECEIPTS + `.bak` BACKUP LEDGER
+// One row per human-approved artifact that was atomically written to the
+// real filesystem under the workspace root (temp file + fs.renameSync),
+// with the exact SHA-256 of the committed bytes and the `.apexpad-backups`
+// snapshot path used by deterministic 1-click rollback.
+model ArtifactDiskCommit {
+  artifactId         String  @id @map("artifact_id")
+  verdictId          String  @map("verdict_id")
+  sessionId          String  @map("session_id")
+  targetFilePath     String  @map("target_file_path")
+  absoluteFilePath   String  @map("absolute_file_path")
+  backupFilePath     String? @map("backup_file_path")
+  existedBeforeCommit Boolean @default(false) @map("existed_before_commit")
+  committedSha256    String  @map("committed_sha256")
+  rolledBack         Boolean @default(false) @map("rolled_back")
+  committedAt        String  @map("committed_at")
+  rolledBackAt       String? @map("rolled_back_at")
+  rollbackReason     String? @map("rollback_reason")
+  restoredSha256     String? @map("restored_sha256")
+
+  @@index([sessionId, committedAt], map: "idx_disk_commit_session")
+  @@map("artifact_disk_commits")
+}
+
+// 16. PHASE 10 (GAP #2): HARD QUARANTINE LEDGER
+// Candidate edits blocked BEFORE artifact staging because the guardrails /
+// deep-behavior / structural gates reported unhealable critical violations.
+// Quarantined edits never reach staged_artifacts.
+model QuarantinedEdit {
+  quarantineId        String @id @map("quarantine_id")
+  sessionId           String @map("session_id")
+  projectSlug         String @map("project_slug")
+  targetFilePath      String @map("target_file_path")
+  blockingReasonsJson String @map("blocking_reasons_json")
+  guardrailReportJson String @map("guardrail_report_json")
+  quarantinedAt       String @map("quarantined_at")
+
+  @@index([sessionId, quarantinedAt], map: "idx_quarantine_session")
+  @@index([projectSlug, quarantinedAt], map: "idx_quarantine_project")
+  @@map("quarantined_edits")
 }

@@ -2,13 +2,15 @@
 
 /**
  * src/components/apexpad/header.tsx
- * Top bar: logo mark, project slug, live telemetry chips, SSE status.
+ * Top bar: logo mark, project slug, PHASE 10 "Saved locally" disk persistence
+ * button, live telemetry chips, SSE status.
  */
 import {
   Zap,
   Settings2,
   ArrowLeftRight,
   Save,
+  HardDriveDownload,
   Dna,
   Database,
   Eye,
@@ -45,11 +47,18 @@ export function WorkbenchHeader({
   session,
   sseConnected,
   booting,
+  savedLocally,
+  savingToDisk,
+  onSaveToDisk,
 }: {
   telemetry: DashboardTelemetrySnapshot | null
   session: SdkSession | null
   sseConnected: boolean
   booting: boolean
+  /** PHASE 10 (GAP #4): receipt of the last real disk write, null when never saved. */
+  savedLocally: { savedAt: string; byteLength: number; sha256: string } | null
+  savingToDisk: boolean
+  onSaveToDisk: () => void
 }) {
   return (
     <header className="flex shrink-0 flex-wrap items-center justify-between gap-x-4 gap-y-2 border-b border-[#30363d] bg-[#161b22] px-4 py-2.5">
@@ -81,6 +90,33 @@ export function WorkbenchHeader({
 
       {/* right: telemetry + sse */}
       <div className="flex flex-wrap items-center gap-1.5">
+        {/* PHASE 10 (GAP #4): real disk persistence — "Saved locally" */}
+        <button
+          type="button"
+          onClick={onSaveToDisk}
+          disabled={savingToDisk || booting}
+          title={
+            savedLocally
+              ? `Last disk write: ${new Date(savedLocally.savedAt).toLocaleTimeString()} • ${savedLocally.byteLength} B • sha ${savedLocally.sha256.slice(0, 10)}…`
+              : 'Persist the active document to the workspace disk (.apexpad-workspace)'
+          }
+          className={cn(
+            'inline-flex min-h-[32px] items-center gap-1.5 rounded-md border px-2.5 py-1 font-mono text-[11px] font-semibold transition-colors disabled:opacity-60',
+            savedLocally
+              ? 'border-[#2ea043]/60 bg-[#238636]/20 text-[#7ee787] hover:bg-[#238636]/30'
+              : 'border-[#30363d] bg-[#21262d] text-[#8b949e] hover:text-[#e6edf3]',
+          )}
+        >
+          {savingToDisk ? (
+            <Loader2 className="h-3 w-3 animate-spin" />
+          ) : (
+            <HardDriveDownload className="h-3 w-3" />
+          )}
+          {savedLocally
+            ? `Saved locally ${new Date(savedLocally.savedAt).toLocaleTimeString()}`
+            : 'Save locally'}
+        </button>
+
         {booting ? (
           <Chip className="px-2 py-1">
             <Loader2 className="h-3 w-3 animate-spin text-[#58a6ff]" />

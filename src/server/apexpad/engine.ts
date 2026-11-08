@@ -36,8 +36,9 @@ export interface ApexEngine {
 /**
  * Bumped whenever the ApexEngine shape changes so a dev-server hot reload
  * discards stale singletons from previous module versions.
+ * v14 — Phase 10: disk-commit orchestrator, quarantine gate, subprocess verifier.
  */
-const ENGINE_VERSION = 13;
+const ENGINE_VERSION = 15;
 
 const globalForEngine = globalThis as unknown as {
   apexpadEngine: ApexEngine | undefined;
@@ -93,6 +94,8 @@ export function getEngine(): Promise<ApexEngine> {
       specStructurer,
       codeGuardrails,
       runtimeVerifier,
+      dagOrchestrator,
+      fullPipeline,
     });
 
     const engine: ApexEngine = {

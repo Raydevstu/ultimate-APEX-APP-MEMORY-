@@ -166,6 +166,64 @@ export interface StagedArtifact {
   createdAt: string;
 }
 
+/* ---------------- PHASE 10: DISK COMMIT / ROLLBACK RECEIPTS (GAP #1) ---------------- */
+
+/** Proof-of-commit emitted when a human-approved artifact is atomically written to disk. */
+export interface DiskCommitReceipt {
+  artifactId: string;
+  verdictId: string;
+  targetFilePath: string;
+  /** Workspace-relative path as displayed in the UI. */
+  absoluteFilePath: string;
+  backupFilePath: string | null;
+  existedBeforeCommit: boolean;
+  committedSha256: string;
+  committedAt: string;
+}
+
+/** Proof-of-restore emitted by the deterministic 1-click `.bak` rollback. */
+export interface DiskRollbackReceipt {
+  artifactId: string;
+  restoredFilePath: string;
+  wasDeletedBecauseNew: boolean;
+  restoredSha256: string | null;
+  rolledBackAt: string;
+  reason: string;
+}
+
+export interface RollbackArtifactRequest {
+  artifactId: string;
+  reason: string;
+}
+
+export interface SaveDocumentRequest {
+  relativeFilePath: string;
+  content: string;
+  notebook?: string;
+  tags?: string[];
+}
+
+export interface SaveDocumentResponse {
+  savedAt: string;
+  filePath: string;
+  absoluteFilePath: string;
+  byteLength: number;
+  sha256: string;
+  existedBefore: boolean;
+}
+
+export interface DiskCommitRecord extends DiskCommitReceipt {
+  sessionId: string;
+  rolledBack: boolean;
+  rolledBackAt: string | null;
+  rollbackReason: string | null;
+  restoredSha256: string | null;
+}
+
+export interface DiskCommitListResponse {
+  commits: DiskCommitRecord[];
+}
+
 export interface PackedContextEnvelope {
   frozenPrefix: string;
   frozenPrefixHash: string;
@@ -253,6 +311,9 @@ export type CaptureEventType =
   | 'agent:turn_complete'
   | 'dag:staged'
   | 'artifact:resolved'
+  | 'artifact:committed'
+  | 'artifact:rolled_back'
+  | 'quarantine:blocked'
   | 'guardrail:report'
   | 'verify:report'
   | 'pipeline:complete'
@@ -318,6 +379,8 @@ export interface ResolveApprovalRequest {
 
 export interface ResolveApprovalResponse {
   resolved: StagedArtifact;
+  /** PHASE 10 (GAP #1): present when approved — proof of the atomic disk commit. */
+  diskReceipt?: DiskCommitReceipt;
   symbols: AstSymbolNode[];
   memoryIndexHits: MemorySearchIndexHit[];
   telemetry: DashboardTelemetrySnapshot;

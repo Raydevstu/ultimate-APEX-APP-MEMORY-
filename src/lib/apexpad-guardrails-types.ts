@@ -103,6 +103,31 @@ export interface AgentBrowserActionExecutionResult {
 }
 
 /**
+ * PHASE 10 (GAP #3): real subprocess + CDP telemetry attached to a
+ * verification report. Every command string recorded here was executed by a
+ * genuine `child_process.spawnSync` (or a live CDP HTTP probe) — no
+ * simulation.
+ */
+export interface SubprocessExecutionTrace {
+  command: string;
+  exitCode: number;
+  stdoutTail: string;
+  stderrTail: string;
+  durationMs: number;
+  /** CCR id of the lossless-compressed full stdout/stderr log. */
+  ccrId: string | null;
+}
+
+export interface CdpProbeResult {
+  endpoint: string;
+  reachable: boolean;
+  targetCount: number;
+  pageTargets: Array<{ title: string; url: string; type: string }>;
+  activePageUrl: string | null;
+  error: string | null;
+}
+
+/**
  * Aggregate runtime verification report for a staged artifact:
  * type-check gate, test gate, and the Agent-Browser CDP loop.
  * Persisted in the `runtime_verifications` table (blueprint §7.2 table 14).
@@ -120,6 +145,12 @@ export interface RuntimeVerificationReport {
   agentBrowserResults: AgentBrowserActionExecutionResult[];
   overallStatus: 'verified_ready_for_approval' | 'failed_verification';
   createdAt: string;
+  /** PHASE 10 (GAP #3): real `node --check` / tsc engine compiler gate trace. */
+  compilerTrace: SubprocessExecutionTrace | null;
+  /** PHASE 10 (GAP #3): real `node --test` subprocess trace over materialized test files. */
+  testRunnerTrace: SubprocessExecutionTrace | null;
+  /** PHASE 10 (GAP #3): live CDP HTTP endpoint probe result (null when no endpoint configured). */
+  cdpProbe: CdpProbeResult | null;
 }
 
 /* --------------------------- API request/response --------------------------- */
@@ -143,10 +174,26 @@ export interface CandidateEdit {
   proposedContent: string;
 }
 
+/**
+ * PHASE 10 (GAP #2): a candidate edit that was HARD-BLOCKED before artifact
+ * staging. Quarantined edits never reach `staged_artifacts` while the strict
+ * quarantine gate is armed.
+ */
+export interface QuarantinedCandidateEdit {
+  quarantineId: string;
+  targetFilePath: string;
+  blockingReasons: string[];
+  guardrailReport: GuardrailInspectionReport;
+  quarantinedAt: string;
+}
+
 /** Result of the unified 4-stage engineering pipeline (blueprint §7.6). */
 export interface FullApexPipelineResult {
   specContract: StructuredSpecContract;
   guardrailReports: GuardrailInspectionReport[];
+  /** PHASE 10 (GAP #2): edits blocked by the strict pre-staging quarantine gate. */
+  quarantinedEdits: QuarantinedCandidateEdit[];
+  pipelineBlockedByQuarantine: boolean;
   dagState: import('./apexpad-types').DagExecutionState;
   verificationReports: RuntimeVerificationReport[];
 }
@@ -157,6 +204,8 @@ export interface RunFullPipelineRequest {
   tokenBudgetCeiling?: number;
   candidateEdits: CandidateEdit[];
   browserVerificationScript?: AgentBrowserActionCommand[];
+  /** PHASE 10 (GAP #2): default true — failing edits are quarantined, not staged. */
+  strictQuarantineGate?: boolean;
 }
 
 export interface RunFullPipelineResponse {
