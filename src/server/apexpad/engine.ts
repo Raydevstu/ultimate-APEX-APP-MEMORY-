@@ -11,6 +11,11 @@ import { DistillationPipeline } from './distillation-pipeline';
 import { ContextEngine, getWorkspaceFileStore } from './context-engine';
 import { ApexDagOrchestrator } from './dag-orchestrator';
 import { ModelRetrievalAdapter } from './model-adapter';
+import { SpecificationStructurer } from './spec-structurer';
+import { ModelGenerationGuardrails } from './guardrails';
+import { RuntimeVerificationEngine } from './runtime-verifier';
+import { FullApexSystemPipeline } from './full-pipeline';
+import { ApexE2eVerificationSuite } from './e2e-suite';
 
 export const PROJECT_SLUG = 'apexpad-editor-v1';
 
@@ -20,16 +25,37 @@ export interface ApexEngine {
   contextEngine: ContextEngine;
   dagOrchestrator: ApexDagOrchestrator;
   modelAdapter: ModelRetrievalAdapter;
+  specStructurer: SpecificationStructurer;
+  codeGuardrails: ModelGenerationGuardrails;
+  runtimeVerifier: RuntimeVerificationEngine;
+  fullPipeline: FullApexSystemPipeline;
+  e2eSuite: ApexE2eVerificationSuite;
   projectSlug: string;
 }
 
+/**
+ * Bumped whenever the ApexEngine shape changes so a dev-server hot reload
+ * discards stale singletons from previous module versions.
+ */
+const ENGINE_VERSION = 9;
+
 const globalForEngine = globalThis as unknown as {
   apexpadEngine: ApexEngine | undefined;
+  apexpadEngineVersion: number | undefined;
   apexpadEngineReady: Promise<ApexEngine> | undefined;
 };
 
 export function getEngine(): Promise<ApexEngine> {
-  if (globalForEngine.apexpadEngineReady) {
+  if (
+    globalForEngine.apexpadEngine &&
+    globalForEngine.apexpadEngineVersion === ENGINE_VERSION
+  ) {
+    return Promise.resolve(globalForEngine.apexpadEngine);
+  }
+  if (
+    globalForEngine.apexpadEngineReady &&
+    globalForEngine.apexpadEngineVersion === ENGINE_VERSION
+  ) {
     return globalForEngine.apexpadEngineReady;
   }
 
@@ -45,6 +71,29 @@ export function getEngine(): Promise<ApexEngine> {
       distillationPipeline,
       contextEngine
     );
+    const specStructurer = new SpecificationStructurer(memoryRouter, contextEngine);
+    const codeGuardrails = new ModelGenerationGuardrails();
+    const runtimeVerifier = new RuntimeVerificationEngine({
+      contextEngine,
+      distillationPipeline,
+    });
+    const fullPipeline = new FullApexSystemPipeline({
+      memoryRouter,
+      distillationPipeline,
+      contextEngine,
+      dagOrchestrator,
+      specStructurer,
+      codeGuardrails,
+      runtimeVerifier,
+    });
+    const e2eSuite = new ApexE2eVerificationSuite({
+      memoryRouter,
+      contextEngine,
+      distillationPipeline,
+      specStructurer,
+      codeGuardrails,
+      runtimeVerifier,
+    });
 
     const engine: ApexEngine = {
       memoryRouter,
@@ -52,12 +101,18 @@ export function getEngine(): Promise<ApexEngine> {
       contextEngine,
       dagOrchestrator,
       modelAdapter,
+      specStructurer,
+      codeGuardrails,
+      runtimeVerifier,
+      fullPipeline,
+      e2eSuite,
       projectSlug: PROJECT_SLUG,
     };
 
     await seedDemoProject(engine);
 
     globalForEngine.apexpadEngine = engine;
+    globalForEngine.apexpadEngineVersion = ENGINE_VERSION;
     return engine;
   })();
 
@@ -238,9 +293,6 @@ async function seedDemoProject(engine: ApexEngine): Promise<void> {
   const existingSymbols = await db.astSymbol.count({
     where: { projectSlug: PROJECT_SLUG },
   });
-  if (existingSymbols > 0) {
-    return; // Already seeded
-  }
 
   const fileContents: Record<string, string> = {
     'src/db/query.ts': DEMO_QUERY_DB,
@@ -251,6 +303,16 @@ async function seedDemoProject(engine: ApexEngine): Promise<void> {
     'src/memory/ccr.test.ts': DEMO_TEST_CCR,
     'notes/architecture.md': DEMO_ARCHITECTURE_NOTE,
   };
+
+  if (existingSymbols > 0) {
+    // DB seed already present — but the in-memory workspace store is EPHEMERAL
+    // (globalThis, dies with the process). Rehydrate it unconditionally so
+    // import resolution, blast radius and the compiler gate see the files.
+    for (const [filePath, content] of Object.entries(fileContents)) {
+      getWorkspaceFileStore().set(filePath, content);
+    }
+    return;
+  }
 
   // Seed sessions with summaries so SessionStart hook shows history
   const dayAgo = (h: number) => new Date(Date.now() - h * 3600_000).toISOString();

@@ -1,0 +1,833 @@
+     1→/**
+     2→ * src/server/apexpad/context-engine.ts
+     3→ * Ripwire AST Call-Graph Indexer, Personalized PageRank (PPR), Blast Radius & Test Gate,
+     4→ * Agent-Browser Snapshot-Ref Indexer, CacheAligner, and U-Curve Attention Context Packer.
+     5→ */
+     6→
+     7→import crypto from 'crypto';
+     8→import { db } from '@/lib/db';
+     9→import { MemoryRouter } from './memory-router';
+    10→import { DistillationPipeline } from './distillation-pipeline';
+    11→import type {
+    12→  AgentBrowserElementRef,
+    13→  AgentBrowserSnapshot,
+    14→  AstDependencyEdge,
+    15→  AstSymbolNode,
+    16→  BlastRadiusReport,
+    17→  EdgeHonestyLabel,
+    18→  PackedContextEnvelope,
+    19→} from '@/lib/apexpad-types';
+    20→
+    21→type SymbolRow = {
+    22→  symbolId: string;
+    23→  projectSlug: string;
+    24→  filePath: string;
+    25→  symbolName: string;
+    26→  kind: string;
+    27→  signature: string;
+    28→  startLine: number;
+    29→  endLine: number;
+    30→  cyclomaticComplexity: number;
+    31→  gitChurn30d: number;
+    32→  hasTestCoverage: boolean;
+    33→  pageRankScore: number;
+    34→  fileSha256: string;
+    35→  updatedAt: string;
+    36→};
+    37→
+    38→const globalForWorkspace = globalThis as unknown as {
+    39→  apexpadWorkspaceFiles: Map<string, string> | undefined;
+    40→};
+    41→
+    42→/** In-memory workspace file contents (single-process dev server). */
+    43→export function getWorkspaceFileStore(): Map<string, string> {
+    44→  if (!globalForWorkspace.apexpadWorkspaceFiles) {
+    45→    globalForWorkspace.apexpadWorkspaceFiles = new Map();
+    46→  }
+    47→  return globalForWorkspace.apexpadWorkspaceFiles;
+    48→}
+    49→
+    50→export class ContextEngine {
+    51→  private memoryRouter: MemoryRouter;
+    52→  private distillationPipeline: DistillationPipeline;
+    53→
+    54→  constructor(memoryRouter: MemoryRouter, distillationPipeline: DistillationPipeline) {
+    55→    this.memoryRouter = memoryRouter;
+    56→    this.distillationPipeline = distillationPipeline;
+    57→  }
+    58→
+    59→  /** Ripwire AST & Markdown Symbol Extractor with stale-memory invalidation. */
+    60→  public async indexFileSymbols(params: {
+    61→    projectSlug: string;
+    62→    filePath: string;
+    63→    content: string;
+    64→    gitChurn30d?: number;
+    65→  }): Promise<AstSymbolNode[]> {
+    66→    const fileSha256 = crypto.createHash('sha256').update(params.content).digest('hex');
+    67→    const now = new Date().toISOString();
+    68→
+    69→    // Magic Context Descent: invalidate observations bound to an older blob hash of this file
+    70→    await this.memoryRouter.invalidateStaleMemoriesForFile(
+    71→      params.projectSlug,
+    72→      params.filePath,
+    73→      fileSha256
+    74→    );
+    75→
+    76→    // Track content in the workspace store for call-graph resolution
+    77→    getWorkspaceFileStore().set(params.filePath, params.content);
+    78→
+    79→    // Remove previous symbols for this file before re-indexing
+    80→    await db.astSymbol.deleteMany({
+    81→      where: { projectSlug: params.projectSlug, filePath: params.filePath },
+    82→    });
+    83→
+    84→    const lines = params.content.split('\n');
+    85→    const symbols: AstSymbolNode[] = [];
+    86→    const isMarkdown = /\.(md|mdx)$/i.test(params.filePath);
+    87→    const isTestFile = /\.(test|spec)\.(ts|tsx|js|jsx|py)$/i.test(params.filePath);
+    88→
+    89→    if (isMarkdown) {
+    90→      lines.forEach((line, idx) => {
+    91→        const headingMatch = /^(#{1,6})\s+(.+)$/.exec(line.trim());
+    92→        if (headingMatch) {
+    93→          const symbolName = headingMatch[2].trim();
+    94→          const symbolId = `sym_${crypto
+    95→            .createHash('sha256')
+    96→            .update(`${params.projectSlug}:${params.filePath}:${symbolName}:${idx + 1}`)
+    97→            .digest('hex')
+    98→            .slice(0, 12)}`;
+    99→
+   100→          symbols.push({
+   101→            symbolId,
+   102→            projectSlug: params.projectSlug,
+   103→            filePath: params.filePath,
+   104→            symbolName,
+   105→            kind: 'heading',
+   106→            signature: line.trim(),
+   107→            startLine: idx + 1,
+   108→            endLine: Math.min(lines.length, idx + 25),
+   109→            cyclomaticComplexity: 1,
+   110→            gitChurn30d: params.gitChurn30d ?? 0,
+   111→            hasTestCoverage: true,
+   112→            pageRankScore: 1.0,
+   113→            fileSha256,
+   114→            updatedAt: now,
+   115→          });
+   116→        }
+   117→      });
+   118→    } else {
+   119→      const declPatterns: Array<{ kind: AstSymbolNode['kind']; regex: RegExp }> = [
+   120→        { kind: 'class', regex: /^(?:export\s+)?(?:abstract\s+)?class\s+([A-Za-z0-9_]+)/ },
+   121→        { kind: 'interface', regex: /^(?:export\s+)?interface\s+([A-Za-z0-9_]+)/ },
+   122→        {
+   123→          kind: 'function',
+   124→          regex: /^(?:export\s+)?(?:async\s+)?function\s+([A-Za-z0-9_]+)\s*\([^)]*\)/,
+   125→        },
+   126→        {
+   127→          kind: 'function',
+   128→          regex:
+   129→            /^(?:export\s+)?const\s+([A-Za-z0-9_]+)\s*=\s*(?:async\s*)?\([^)]*\)\s*(?::\s*[^=]+)?=>/,
+   130→        },
+   131→        {
+   132→          kind: 'method',
+   133→          regex:
+   134→            /^(?:public|private|protected|async)\s+(?:async\s+)?([A-Za-z0-9_]+)\s*\([^)]*\)/,
+   135→        },
+   136→      ];
+   137→
+   138→      for (let i = 0; i < lines.length; i++) {
+   139→        const trimmed = lines[i].trim();
+   140→        for (const pat of declPatterns) {
+   141→          const match = pat.regex.exec(trimmed);
+   142→          if (match) {
+   143→            const symbolName = match[1];
+   144→            const endLine = this.findBlockEndLine(lines, i);
+   145→            const blockSlice = lines.slice(i, endLine).join('\n');
+   146→            const cyclomaticComplexity = this.computeCyclomaticComplexity(blockSlice);
+   147→            const symbolId = `sym_${crypto
+   148→              .createHash('sha256')
+   149→              .update(`${params.projectSlug}:${params.filePath}:${symbolName}:${i + 1}`)
+   150→              .digest('hex')
+   151→              .slice(0, 12)}`;
+   152→
+   153→            symbols.push({
+   154→              symbolId,
+   155→              projectSlug: params.projectSlug,
+   156→              filePath: params.filePath,
+   157→              symbolName,
+   158→              kind: pat.kind,
+   159→              signature: trimmed.replace(/\{$/, '').trim(),
+   160→              startLine: i + 1,
+   161→              endLine,
+   162→              cyclomaticComplexity,
+   163→              gitChurn30d: params.gitChurn30d ?? 0,
+   164→              hasTestCoverage: isTestFile,
+   165→              pageRankScore: 1.0,
+   166→              fileSha256,
+   167→              updatedAt: now,
+   168→            });
+   169→            break;
+   170→          }
+   171→        }
+   172→      }
+   173→    }
+   174→
+   175→    if (symbols.length > 0) {
+   176→      await db.astSymbol.createMany({
+   177→        data: symbols.map((s) => ({
+   178→          symbolId: s.symbolId,
+   179→          projectSlug: s.projectSlug,
+   180→          filePath: s.filePath,
+   181→          symbolName: s.symbolName,
+   182→          kind: s.kind,
+   183→          signature: s.signature,
+   184→          startLine: s.startLine,
+   185→          endLine: s.endLine,
+   186→          cyclomaticComplexity: s.cyclomaticComplexity,
+   187→          gitChurn30d: s.gitChurn30d,
+   188→          hasTestCoverage: s.hasTestCoverage,
+   189→          pageRankScore: s.pageRankScore,
+   190→          fileSha256: s.fileSha256,
+   191→          updatedAt: s.updatedAt,
+   192→        })),
+   193→      });
+   194→    }
+   195→
+   196→    return symbols;
+   197→  }
+   198→
+   199→  /** Ripwire directed call edges + Markdown [[Backlinks]] with Honesty Contract labels. */
+   200→  public async rebuildCallGraphEdges(
+   201→    projectSlug: string,
+   202→    fileContentsByPath: Record<string, string>
+   203→  ): Promise<AstDependencyEdge[]> {
+   204→    // Merge newly provided contents into the workspace store
+   205→    const store = getWorkspaceFileStore();
+   206→    for (const [p, c] of Object.entries(fileContentsByPath)) {
+   207→      store.set(p, c);
+   208→    }
+   209→
+   210→    const allSymbols = await this.getAllProjectSymbols(projectSlug);
+   211→    const symbolsByName = new Map<string, AstSymbolNode[]>();
+   212→    for (const sym of allSymbols) {
+   213→      const list = symbolsByName.get(sym.symbolName) ?? [];
+   214→      list.push(sym);
+   215→      symbolsByName.set(sym.symbolName, list);
+   216→    }
+   217→
+   218→    await db.astEdge.deleteMany({ where: { projectSlug } });
+   219→
+   220→    const edges: AstDependencyEdge[] = [];
+   221→    const callTokenRegex = /\b([A-Za-z_][A-Za-z0-9_]{2,})\s*\(/g;
+   222→    const wikiLinkRegex = /\[\[([^\]|#]+)(?:#([^\]|]+))?(?:\|[^\]]+)?\]\]/g;
+   223→
+   224→    for (const callerSym of allSymbols) {
+   225→      const fileContent = store.get(callerSym.filePath);
+   226→      if (!fileContent) continue;
+   227→
+   228→      const lines = fileContent.split('\n');
+   229→      const bodyText = lines
+   230→        .slice(Math.max(0, callerSym.startLine - 1), callerSym.endLine)
+   231→        .join('\n');
+   232→
+   233→      if (callerSym.kind === 'heading') {
+   234→        let linkMatch: RegExpExecArray | null;
+   235→        while ((linkMatch = wikiLinkRegex.exec(bodyText)) !== null) {
+   236→          const targetHeadingOrNote = (linkMatch[2] || linkMatch[1]).trim();
+   237→          const candidates = symbolsByName.get(targetHeadingOrNote) ?? [];
+   238→          for (const callee of candidates) {
+   239→            if (callee.symbolId !== callerSym.symbolId) {
+   240→              edges.push(this.makeEdge(projectSlug, callerSym, callee, 'markdown_backlink', 1.0));
+   241→            }
+   242→          }
+   243→        }
+   244→      } else {
+   245→        const seenCallees = new Set<string>();
+   246→        let callMatch: RegExpExecArray | null;
+   247→        while ((callMatch = callTokenRegex.exec(bodyText)) !== null) {
+   248→          const calledName = callMatch[1];
+   249→          if (calledName === callerSym.symbolName) continue;
+   250→          const candidates = symbolsByName.get(calledName);
+   251→          if (!candidates || candidates.length === 0) continue;
+   252→
+   253→          // Ripwire Honesty Contract: ambiguous when multiple same-name defs exist
+   254→          const honestyLabel: EdgeHonestyLabel =
+   255→            candidates.length === 1 ? 'exact' : 'heuristic_ambiguous';
+   256→          const splitWeight = Number((1.0 / candidates.length).toFixed(3));
+   257→
+   258→          for (const callee of candidates) {
+   259→            if (callee.symbolId === callerSym.symbolId) continue;
+   260→            const dedupeKey = `${callerSym.symbolId}->${callee.symbolId}`;
+   261→            if (!seenCallees.has(dedupeKey)) {
+   262→              seenCallees.add(dedupeKey);
+   263→              edges.push(this.makeEdge(projectSlug, callerSym, callee, honestyLabel, splitWeight));
+   264→            }
+   265→          }
+   266→        }
+   267→      }
+   268→    }
+   269→
+   270→    if (edges.length > 0) {
+   271→      const callerRows = new Map(allSymbols.map((s) => [s.symbolId, s]));
+   272→      const calleeRows = new Map(allSymbols.map((s) => [s.symbolId, s]));
+   273→
+   274→      await db.astEdge.createMany({
+   275→        data: edges.map((e) => ({
+   276→          edgeId: e.edgeId,
+   277→          projectSlug: e.projectSlug,
+   278→          callerSymbolId: e.callerSymbolId,
+   279→          calleeSymbolId: e.calleeSymbolId,
+   280→          callerFile: callerRows.get(e.callerSymbolId)?.filePath ?? '',
+   281→          calleeFile: calleeRows.get(e.calleeSymbolId)?.filePath ?? '',
+   282→          honestyLabel: e.honestyLabel,
+   283→          weight: e.weight,
+   284→        })),
+   285→      });
+   286→
+   287→      // Test-coverage propagation from *.test.*/ *.spec.* callers
+   288→      const testCallerEdges = edges.filter((e) => /\.(test|spec)\./i.test(e.callerFile));
+   289→      for (const e of testCallerEdges) {
+   290→        await db.astSymbol.updateMany({
+   291→          where: { symbolId: e.calleeSymbolId, hasTestCoverage: false },
+   292→          data: { hasTestCoverage: true },
+   293→        });
+   294→      }
+   295→    }
+   296→
+   297→    return edges;
+   298→  }
+   299→
+   300→  /** Ripwire Personalized PageRank Task-Lens Ranking (alpha=0.85, 20 iterations). */
+   301→  public async computePersonalizedPageRank(
+   302→    projectSlug: string,
+   303→    taskQuery: string,
+   304→    iterations = 20,
+   305→    damping = 0.85
+   306→  ): Promise<AstSymbolNode[]> {
+   307→    const symbols = await this.getAllProjectSymbols(projectSlug);
+   308→    if (symbols.length === 0) return [];
+   309→
+   310→    const edges = await this.getAllProjectEdges(projectSlug);
+   311→    const n = symbols.length;
+   312→    const idToIndex = new Map<string, number>();
+   313→    symbols.forEach((s, idx) => idToIndex.set(s.symbolId, idx));
+   314→
+   315→    const queryTokens = taskQuery
+   316→      .toLowerCase()
+   317→      .split(/[^a-z0-9_]+/)
+   318→      .filter((t) => t.length >= 2);
+   319→
+   320→    // Seed vector (teleportation distribution)
+   321→    const seedVector = new Float64Array(n);
+   322→    let seedSum = 0;
+   323→
+   324→    symbols.forEach((s, idx) => {
+   325→      const symLower = s.symbolName.toLowerCase();
+   326→      const fileLower = s.filePath.toLowerCase();
+   327→      let boost = 0.05; // baseline uniform floor
+   328→      for (const tok of queryTokens) {
+   329→        if (symLower === tok) boost += 5.0;
+   330→        else if (symLower.includes(tok)) boost += 2.0;
+   331→        if (fileLower.includes(tok)) boost += 1.0;
+   332→      }
+   333→      seedVector[idx] = boost;
+   334→      seedSum += boost;
+   335→    });
+   336→
+   337→    if (seedSum > 0) {
+   338→      for (let i = 0; i < n; i++) {
+   339→        seedVector[i] /= seedSum;
+   340→      }
+   341→    }
+   342→
+   343→    // Bidirectional adjacency (callers & callees both propagate task relevance)
+   344→    const outgoing = Array.from({ length: n }, () => [] as Array<{ to: number; weight: number }>);
+   345→    const outWeightSum = new Float64Array(n);
+   346→
+   347→    for (const e of edges) {
+   348→      const u = idToIndex.get(e.callerSymbolId);
+   349→      const v = idToIndex.get(e.calleeSymbolId);
+   350→      if (u !== undefined && v !== undefined) {
+   351→        outgoing[u].push({ to: v, weight: e.weight });
+   352→        outWeightSum[u] += e.weight;
+   353→        outgoing[v].push({ to: u, weight: e.weight * 0.7 });
+   354→        outWeightSum[v] += e.weight * 0.7;
+   355→      }
+   356→    }
+   357→
+   358→    let ranks = new Float64Array(seedVector);
+   359→    for (let iter = 0; iter < iterations; iter++) {
+   360→      const nextRanks = new Float64Array(n);
+   361→      let danglingMass = 0;
+   362→
+   363→      for (let i = 0; i < n; i++) {
+   364→        if (outWeightSum[i] === 0) {
+   365→          danglingMass += ranks[i];
+   366→        } else {
+   367→          for (const edge of outgoing[i]) {
+   368→            nextRanks[edge.to] += damping * ranks[i] * (edge.weight / outWeightSum[i]);
+   369→          }
+   370→        }
+   371→      }
+   372→
+   373→      for (let i = 0; i < n; i++) {
+   374→        nextRanks[i] +=
+   375→          damping * danglingMass * seedVector[i] + (1 - damping) * seedVector[i];
+   376→      }
+   377→      ranks = nextRanks;
+   378→    }
+   379→
+   380→    const tx: Array<Promise<unknown>> = [];
+   381→    symbols.forEach((s, idx) => {
+   382→      s.pageRankScore = Number((ranks[idx] * 100).toFixed(4));
+   383→      tx.push(
+   384→        db.astSymbol.update({
+   385→          where: { symbolId: s.symbolId },
+   386→          data: { pageRankScore: s.pageRankScore },
+   387→        })
+   388→      );
+   389→    });
+   390→    await Promise.all(tx);
+   391→
+   392→    return [...symbols].sort((a, b) => b.pageRankScore - a.pageRankScore);
+   393→  }
+   394→
+   395→  /** Ripwire Blast Radius, Contract Check, Layer Gate & Test Gate. */
+   396→  public async analyzeEditBlastRadius(params: {
+   397→    projectSlug: string;
+   398→    targetFilePath: string;
+   399→    proposedContent: string;
+   400→    previousContent: string;
+   401→  }): Promise<BlastRadiusReport> {
+   402→    const allSymbols = await this.getAllProjectSymbols(params.projectSlug);
+   403→    const allEdges = await this.getAllProjectEdges(params.projectSlug);
+   404→    const symbolMap = new Map<string, AstSymbolNode>(allSymbols.map((s) => [s.symbolId, s]));
+   405→
+   406→    const fileSymbols = allSymbols.filter((s) => s.filePath === params.targetFilePath);
+   407→    const targetSymbolIds = new Set(fileSymbols.map((s) => s.symbolId));
+   408→
+   409→    // Direct callers
+   410→    const directCallerIds = new Set<string>();
+   411→    let honestyFloorDisclosed = false;
+   412→
+   413→    for (const e of allEdges) {
+   414→      if (targetSymbolIds.has(e.calleeSymbolId) && !targetSymbolIds.has(e.callerSymbolId)) {
+   415→        directCallerIds.add(e.callerSymbolId);
+   416→        if (e.honestyLabel === 'heuristic_ambiguous') {
+   417→          honestyFloorDisclosed = true;
+   418→        }
+   419→      }
+   420→    }
+   421→
+   422→    // 2-hop transitive callers
+   423→    const transitiveCallerIds = new Set<string>(directCallerIds);
+   424→    for (const e of allEdges) {
+   425→      if (directCallerIds.has(e.calleeSymbolId) && !targetSymbolIds.has(e.callerSymbolId)) {
+   426→        transitiveCallerIds.add(e.callerSymbolId);
+   427→      }
+   428→    }
+   429→
+   430→    const directCallers = Array.from(directCallerIds)
+   431→      .map((id) => symbolMap.get(id))
+   432→      .filter((s): s is AstSymbolNode => Boolean(s));
+   433→
+   434→    const transitiveCallers = Array.from(transitiveCallerIds)
+   435→      .map((id) => symbolMap.get(id))
+   436→      .filter((s): s is AstSymbolNode => Boolean(s));
+   437→
+   438→    const affectedFiles = Array.from(new Set(transitiveCallers.map((s) => s.filePath)));
+   439→    const requiredTests = affectedFiles.filter((f) => /\.(test|spec)\./i.test(f));
+   440→
+   441→    // Contract change detection (old signatures vs proposed content)
+   442→    const contractChangesDetected: string[] = [];
+   443→    for (const sym of fileSymbols) {
+   444→      if (sym.kind !== 'heading' && !params.proposedContent.includes(sym.signature)) {
+   445→        contractChangesDetected.push(
+   446→          `Signature altered or removed: ${sym.symbolName} (was: "${sym.signature}")`
+   447→        );
+   448→      }
+   449→    }
+   450→
+   451→    // Architecture layer deny rules from Project DNA (e.g., "deny renderer -> db")
+   452→    const dnaRules = await this.memoryRouter.getProjectDnaRules(params.projectSlug);
+   453→    const architectureViolations: string[] = [];
+   454→    for (const rule of dnaRules) {
+   455→      if (rule.layerDenyRule) {
+   456→        const match = /^deny\s+([a-zA-Z0-9_-]+)\s*->\s*([a-zA-Z0-9_-]+)$/i.exec(
+   457→          rule.layerDenyRule.trim()
+   458→        );
+   459→        if (match) {
+   460→          const fromLayer = match[1].toLowerCase();
+   461→          const toLayer = match[2].toLowerCase();
+   462→          if (
+   463→            params.targetFilePath.toLowerCase().includes(fromLayer) &&
+   464→            new RegExp(`from\\s+['"][^'"]*${toLayer}[^'"]*['"]`, 'i').test(params.proposedContent)
+   465→          ) {
+   466→            architectureViolations.push(
+   467→              `Layer Violation [${rule.ruleKey}]: "${params.targetFilePath}" (${fromLayer}) imports forbidden layer "${toLayer}".`
+   468→            );
+   469→          }
+   470→        }
+   471→      }
+   472→    }
+   473→
+   474→    const oldComplexity = this.computeCyclomaticComplexity(params.previousContent);
+   475→    const newComplexity = this.computeCyclomaticComplexity(params.proposedContent);
+   476→    const cyclomaticDelta = newComplexity - oldComplexity;
+   477→    const propagationCost = Number(
+   478→      (transitiveCallers.length / Math.max(1, allSymbols.length)).toFixed(4)
+   479→    );
+   480→
+   481→    return {
+   482→      targetSymbols: fileSymbols.map((s) => s.symbolName),
+   483→      directCallers,
+   484→      transitiveCallers,
+   485→      affectedFiles,
+   486→      requiredTests,
+   487→      contractChangesDetected,
+   488→      architectureViolations,
+   489→      cyclomaticDelta,
+   490→      propagationCost,
+   491→      honestyFloorDisclosed,
+   492→    };
+   493→  }
+   494→
+   495→  /** Agent-Browser Snapshot + stable @e1 RefMap generator with unified DOM diff. */
+   496→  public async createUiSnapshot(params: {
+   497→    sessionId: string;
+   498→    url: string;
+   499→    elements: Array<{
+   500→      role: string;
+   501→      name: string;
+   502→      tagName: string;
+   503→      isInteractive: boolean;
+   504→      isDisabled?: boolean;
+   505→      isVisibleInViewport?: boolean;
+   506→      boundingBox?: { x: number; y: number; width: number; height: number };
+   507→      domPathSelector: string;
+   508→    }>;
+   509→  }): Promise<AgentBrowserSnapshot> {
+   510→    const refMap: Record<string, AgentBrowserElementRef> = {};
+   511→    const treeLines: string[] = [];
+   512→
+   513→    params.elements.forEach((el, idx) => {
+   514→      const refKey = `e${idx + 1}`;
+   515→      const refTag = `@${refKey}`;
+   516→      const refObj: AgentBrowserElementRef = {
+   517→        refId: refTag,
+   518→        role: el.role,
+   519→        name: el.name,
+   520→        tagName: el.tagName,
+   521→        isInteractive: el.isInteractive,
+   522→        isDisabled: Boolean(el.isDisabled),
+   523→        isVisibleInViewport: el.isVisibleInViewport ?? true,
+   524→        boundingBox: el.boundingBox ?? { x: 0, y: 0, width: 100, height: 32 },
+   525→        domPathSelector: el.domPathSelector,
+   526→      };
+   527→      refMap[refTag] = refObj;
+   528→
+   529→      const flags = [
+   530→        `[ref=${refKey}]`,
+   531→        refObj.isDisabled ? '[disabled]' : '',
+   532→        !refObj.isVisibleInViewport ? '[offscreen]' : '',
+   533→      ]
+   534→        .filter(Boolean)
+   535→        .join(' ');
+   536→      treeLines.push(`- ${el.role} "${el.name}" ${flags}`);
+   537→    });
+   538→
+   539→    const compactTextTree = treeLines.join('\n');
+   540→    const domHash = crypto.createHash('sha256').update(compactTextTree).digest('hex').slice(0, 16);
+   541→
+   542→    const prevRow = await db.uiSnapshot.findFirst({
+   543→      where: { sessionId: params.sessionId },
+   544→      orderBy: { createdAt: 'desc' },
+   545→    });
+   546→
+   547→    let diffFromPrevious: string | null = null;
+   548→    if (prevRow) {
+   549→      const prevSet = new Set(prevRow.compactTextTree.split('\n'));
+   550→      const currSet = new Set(treeLines);
+   551→      const added = treeLines.filter((l) => !prevSet.has(l)).map((l) => `+ ${l}`);
+   552→      const removed = prevRow.compactTextTree
+   553→        .split('\n')
+   554→        .filter((l) => !currSet.has(l))
+   555→        .map((l) => `- ${l}`);
+   556→      diffFromPrevious = [...removed, ...added].join('\n') || 'NO_DOM_CHANGES';
+   557→    }
+   558→
+   559→    const snapshotId = `snap_${crypto.randomBytes(6).toString('hex')}`;
+   560→    const now = new Date().toISOString();
+   561→
+   562→    await db.uiSnapshot.create({
+   563→      data: {
+   564→        snapshotId,
+   565→        sessionId: params.sessionId,
+   566→        url: params.url,
+   567→        domHash,
+   568→        compactTextTree,
+   569→        refMapJson: JSON.stringify(refMap),
+   570→        diffFromPrevious,
+   571→        createdAt: now,
+   572→      },
+   573→    });
+   574→
+   575→    return {
+   576→      snapshotId,
+   577→      sessionId: params.sessionId,
+   578→      url: params.url,
+   579→      domHash,
+   580→      compactTextTree,
+   581→      refMap,
+   582→      diffFromPrevious,
+   583→      createdAt: now,
+   584→    };
+   585→  }
+   586→
+   587→  /** Master Context Packer: CacheAligner Frozen Prefix + Byte Ceiling + U-Curve packing. */
+   588→  public async buildContextPack(params: {
+   589→    sessionId: string;
+   590→    projectSlug: string;
+   591→    userTaskPrompt: string;
+   592→    tokenBudgetCeiling: number;
+   593→    activeCcrBlocks?: Array<{ sourceLabel: string; rawContent: string }>;
+   594→  }): Promise<PackedContextEnvelope> {
+   595→    // 1. FROZEN PREFIX ZONE (CacheAligner: byte-identical order for 100% KV-cache hits)
+   596→    const dnaRules = await this.memoryRouter.getProjectDnaRules(params.projectSlug);
+   597→    const sortedDna = [...dnaRules].sort((a, b) => a.ruleKey.localeCompare(b.ruleKey));
+   598→
+   599→    const frozenPrefixLines: string[] = [
+   600→      `<apexpad_frozen_prefix project="${params.projectSlug}">`,
+   601→      `  <system_contract>`,
+   602→      `    You are the ApexPad Tier-1 Engineering Intelligence. Never emit stubs or placeholders.`,
+   603→      `    Emit durable architectural learnings inline using <memory category="decision|bugfix|arch_rule|invariant" scope="repo" title="..." subtitle="..." files="..." symbols="...">...</memory>.`,
+   604→      `    If a compressed block carries <ccr_ref id="ccr_..." />, call headroom_retrieve(ccrId) when exact implementation lines are required.`,
+   605→      `  </system_contract>`,
+   606→      `  <project_dna count="${sortedDna.length}">`,
+   607→      ...sortedDna.map(
+   608→        (r) =>
+   609→          `    <dna_rule key="${r.ruleKey}" category="${r.category}" confirmed="${r.confirmationSessions}" deny="${r.layerDenyRule ?? 'none'}">${r.ruleStatement}</dna_rule>`
+   610→      ),
+   611→      `  </project_dna>`,
+   612→      `</apexpad_frozen_prefix>`,
+   613→    ];
+   614→
+   615→    const frozenPrefix = frozenPrefixLines.join('\n');
+   616→    const frozenPrefixHash = crypto.createHash('sha256').update(frozenPrefix).digest('hex');
+   617→    const frozenTokens = MemoryRouter.estimateTokens(frozenPrefix);
+   618→
+   619→    // 2. Ripwire conservative byte ceiling for live zone (2.36 B/tok * 0.90 headroom)
+   620→    const remainingTokenBudget = Math.max(250, params.tokenBudgetCeiling - frozenTokens);
+   621→    const byteCeiling = Math.floor(remainingTokenBudget * 2.36 * 0.9);
+   622→
+   623→    // 3. Rank AST symbols by Personalized PageRank for this task
+   624→    const rankedSymbols = await this.computePersonalizedPageRank(
+   625→      params.projectSlug,
+   626→      params.userTaskPrompt
+   627→    );
+   628→
+   629→    // 4. Progressive disclosure memory retrieval
+   630→    const indexHits = await this.memoryRouter.searchIndex({
+   631→      projectSlug: params.projectSlug,
+   632→      query: params.userTaskPrompt,
+   633→      limit: 10,
+   634→    });
+   635→    const topFullObservations = await this.memoryRouter.getObservationsByIds(
+   636→      indexHits.slice(0, 3).map((h) => h.id)
+   637→    );
+   638→    const middleIndexHits = indexHits.slice(3);
+   639→
+   640→    // 5. Compress tool outputs / active files via Headroom CCR
+   641→    const ccrStubs: string[] = [];
+   642→    const includedCcrIds: string[] = [];
+   643→    for (const block of params.activeCcrBlocks ?? []) {
+   644→      const ccr = await this.distillationPipeline.compressAndStoreCCR({
+   645→        sessionId: params.sessionId,
+   646→        sourceLabel: block.sourceLabel,
+   647→        rawContent: block.rawContent,
+   648→      });
+   649→      ccrStubs.push(ccr.compressedStub);
+   650→      includedCcrIds.push(ccr.ccrId);
+   651→    }
+   652→
+   653→    // 6. U-Curve attention packing under strict byte ceiling
+   654→    const topEdgeItems: string[] = [];
+   655→    const middleTroughItems: string[] = [];
+   656→    const bottomEdgeItems: string[] = [
+   657→      `  <active_task_prompt>${params.userTaskPrompt}</active_task_prompt>`,
+   658→    ];
+   659→
+   660→    const includedSymbolIds: string[] = [];
+   661→    const includedObservationIds: string[] = [];
+   662→    const truncationDisclosures: string[] = [];
+   663→
+   664→    let usedBytes = Buffer.byteLength(bottomEdgeItems.join('\n'), 'utf8') + 160;
+   665→
+   666→    // Fill Top Edge with highest PageRank symbols first
+   667→    for (const sym of rankedSymbols) {
+   668→      const symXml = `    <sym id="${sym.symbolId}" file="${sym.filePath}:${sym.startLine}-${sym.endLine}" kind="${sym.kind}" ppr="${sym.pageRankScore}" cx="${sym.cyclomaticComplexity}" tested="${sym.hasTestCoverage}">${sym.signature}</sym>`;
+   669→      const itemBytes = Buffer.byteLength(symXml, 'utf8') + 1;
+   670→      if (usedBytes + itemBytes <= byteCeiling * 0.45 && includedSymbolIds.length < 25) {
+   671→        topEdgeItems.push(symXml);
+   672→        includedSymbolIds.push(sym.symbolId);
+   673→        usedBytes += itemBytes;
+   674→      } else {
+   675→        break;
+   676→      }
+   677→    }
+   678→
+   679→    if (rankedSymbols.length > includedSymbolIds.length) {
+   680→      truncationDisclosures.push(
+   681→        `ast_symbols: shipped ${includedSymbolIds.length} of ${rankedSymbols.length} ranked symbols under byte ceiling (${byteCeiling} B)`
+   682→      );
+   683→    }
+   684→
+   685→    // Add Top-3 full observations to Top Edge
+   686→    for (const obs of topFullObservations) {
+   687→      const obsXml = `    <obs_full id="${obs.id}" cat="${obs.category}" confirmed="${obs.confirmationCount}" files="${obs.referencedFiles.join(',')}">${obs.title}: ${obs.narrative}</obs_full>`;
+   688→      const itemBytes = Buffer.byteLength(obsXml, 'utf8') + 1;
+   689→      if (usedBytes + itemBytes <= byteCeiling * 0.65) {
+   690→        topEdgeItems.push(obsXml);
+   691→        includedObservationIds.push(obs.id);
+   692→        usedBytes += itemBytes;
+   693→      }
+   694→    }
+   695→
+   696→    // Fill Middle Trough with progressive index hits + CCR stubs
+   697→    for (const hit of middleIndexHits) {
+   698→      const hitXml = `    <obs_index id="${hit.id}" cat="${hit.category}" est_tok="${hit.tokenEstimate}" hint="Call get_observations(['${hit.id}']) for details">${hit.title} — ${hit.subtitle}</obs_index>`;
+   699→      const itemBytes = Buffer.byteLength(hitXml, 'utf8') + 1;
+   700→      if (usedBytes + itemBytes <= byteCeiling * 0.85) {
+   701→        middleTroughItems.push(hitXml);
+   702→        includedObservationIds.push(hit.id);
+   703→        usedBytes += itemBytes;
+   704→      }
+   705→    }
+   706→
+   707→    for (const stub of ccrStubs) {
+   708→      const stubXml = `    <ccr_payload>\n${stub}\n    </ccr_payload>`;
+   709→      const itemBytes = Buffer.byteLength(stubXml, 'utf8') + 1;
+   710→      if (usedBytes + itemBytes <= byteCeiling * 0.98) {
+   711→        middleTroughItems.push(stubXml);
+   712→        usedBytes += itemBytes;
+   713→      } else {
+   714→        truncationDisclosures.push(`ccr_payload: omitted 1 payload exceeding live-zone byte ceiling`);
+   715→      }
+   716→    }
+   717→
+   718→    const liveZoneXml = [
+   719→      `<apexpad_live_context byte_ceiling="${byteCeiling}" used_bytes="${usedBytes}">`,
+   720→      `  <u_curve_top_high_attention>`,
+   721→      ...topEdgeItems,
+   722→      `  </u_curve_top_high_attention>`,
+   723→      `  <u_curve_middle_progressive_index_and_ccr>`,
+   724→      ...middleTroughItems,
+   725→      `  </u_curve_middle_progressive_index_and_ccr>`,
+   726→      `  <u_curve_bottom_immediate_task>`,
+   727→      ...bottomEdgeItems,
+   728→      `    <honesty_disclosures count="${truncationDisclosures.length}">`,
+   729→      ...truncationDisclosures.map((d) => `      <disclosure>${d}</disclosure>`),
+   730→      `    </honesty_disclosures>`,
+   731→      `  </u_curve_bottom_immediate_task>`,
+   732→      `</apexpad_live_context>`,
+   733→    ].join('\n');
+   734→
+   735→    const estimatedTotalTokens = frozenTokens + MemoryRouter.estimateTokens(liveZoneXml);
+   736→
+   737→    return {
+   738→      frozenPrefix,
+   739→      frozenPrefixHash,
+   740→      liveZoneXml,
+   741→      estimatedTotalTokens,
+   742→      tokenBudgetCeiling: params.tokenBudgetCeiling,
+   743→      byteCeiling,
+   744→      includedObservationIds,
+   745→      includedSymbolIds,
+   746→      includedCcrIds,
+   747→      truncationDisclosures,
+   748→    };
+   749→  }
+   750→
+   751→  public async getAllProjectSymbols(projectSlug: string): Promise<AstSymbolNode[]> {
+   752→    const rows = await db.astSymbol.findMany({
+   753→      where: { projectSlug },
+   754→      orderBy: { pageRankScore: 'desc' },
+   755→    });
+   756→    return rows.map((r: SymbolRow) => ({
+   757→      symbolId: r.symbolId,
+   758→      projectSlug: r.projectSlug,
+   759→      filePath: r.filePath,
+   760→      symbolName: r.symbolName,
+   761→      kind: r.kind as AstSymbolNode['kind'],
+   762→      signature: r.signature,
+   763→      startLine: r.startLine,
+   764→      endLine: r.endLine,
+   765→      cyclomaticComplexity: r.cyclomaticComplexity,
+   766→      gitChurn30d: r.gitChurn30d,
+   767→      hasTestCoverage: r.hasTestCoverage,
+   768→      pageRankScore: r.pageRankScore,
+   769→      fileSha256: r.fileSha256,
+   770→      updatedAt: r.updatedAt,
+   771→    }));
+   772→  }
+   773→
+   774→  public async getAllProjectEdges(projectSlug: string): Promise<AstDependencyEdge[]> {
+   775→    const rows = await db.astEdge.findMany({ where: { projectSlug } });
+   776→    return rows.map((r) => ({
+   777→      edgeId: r.edgeId,
+   778→      projectSlug: r.projectSlug,
+   779→      callerSymbolId: r.callerSymbolId,
+   780→      calleeSymbolId: r.calleeSymbolId,
+   781→      callerFile: r.callerFile,
+   782→      calleeFile: r.calleeFile,
+   783→      honestyLabel: r.honestyLabel as EdgeHonestyLabel,
+   784→      weight: r.weight,
+   785→    }));
+   786→  }
+   787→
+   788→  private makeEdge(
+   789→    projectSlug: string,
+   790→    caller: AstSymbolNode,
+   791→    callee: AstSymbolNode,
+   792→    honestyLabel: EdgeHonestyLabel,
+   793→    weight: number
+   794→  ): AstDependencyEdge {
+   795→    const edgeId = `edge_${crypto
+   796→      .createHash('sha256')
+   797→      .update(`${projectSlug}:${caller.symbolId}->${callee.symbolId}`)
+   798→      .digest('hex')
+   799→      .slice(0, 12)}`;
+   800→    return {
+   801→      edgeId,
+   802→      projectSlug,
+   803→      callerSymbolId: caller.symbolId,
+   804→      calleeSymbolId: callee.symbolId,
+   805→      callerFile: caller.filePath,
+   806→      calleeFile: callee.filePath,
+   807→      honestyLabel,
+   808→      weight,
+   809→    };
+   810→  }
+   811→
+   812→  private findBlockEndLine(lines: string[], startIndex: number): number {
+   813→    let depth = 0;
+   814→    let foundOpen = false;
+   815→    for (let i = startIndex; i < lines.length; i++) {
+   816→      const open = (lines[i].match(/\{/g) || []).length;
+   817→      const close = (lines[i].match(/\}/g) || []).length;
+   818→      if (open > 0) foundOpen = true;
+   819→      depth += open - close;
+   820→      if (foundOpen && depth <= 0) {
+   821→        return i + 1;
+   822→      }
+   823→    }
+   824→    return Math.min(lines.length, startIndex + 25);
+   825→  }
+   826→
+   827→  private computeCyclomaticComplexity(codeBlock: string): number {
+   828→    const branches =
+   829→      codeBlock.match(/\b(if|else\s+if|for|while|case|catch)\b|\?\s*[^:]+\s*:|&&|\|\|/g) || [];
+   830→    return 1 + branches.length;
+   831→  }
+   832→}
+   833→

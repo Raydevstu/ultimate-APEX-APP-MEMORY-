@@ -29,6 +29,25 @@ import type {
   StagedArtifact,
   TimelineResponse,
 } from '@/lib/apexpad-types'
+import type {
+  StructureSpecRequest,
+  StructureSpecResponse,
+  StructuredSpecContract,
+  InspectGuardrailsRequest,
+  InspectGuardrailsResponse,
+  GuardrailReportListResponse,
+  SetLiveDomStateRequest,
+  SetLiveDomStateResponse,
+  ExecuteAgentBrowserCommandRequest,
+  ExecuteAgentBrowserCommandResponse,
+  GetBrowserSessionStateResponse,
+  RunRuntimeVerificationRequest,
+  RunRuntimeVerificationResponse,
+  RuntimeVerificationListResponse,
+  RunFullPipelineRequest,
+  RunFullPipelineResponse,
+  RunE2eSuiteResponse,
+} from '@/lib/apexpad-guardrails-types'
 
 /* -------- Response envelopes missing from the shared types file -------- */
 
@@ -47,6 +66,11 @@ export interface ApexpadMemorySearchResponse {
 
 export interface ApexpadStagedArtifactsResponse {
   artifacts: StagedArtifact[]
+}
+
+export interface ApexpadSpecListResponse {
+  specs: StructuredSpecContract[]
+  telemetry: DashboardTelemetrySnapshot
 }
 
 /* --------------------------------- core --------------------------------- */
@@ -71,11 +95,12 @@ async function parseErrorBody(res: Response): Promise<string> {
   return `HTTP ${res.status} ${res.statusText}`
 }
 
-async function request<T>(path: string, body?: unknown): Promise<T> {
+async function request<T>(path: string, body?: unknown, method?: 'POST' | 'PUT'): Promise<T> {
+  const verb = method ?? (body === undefined ? 'GET' : 'POST')
   let res: Response
   try {
     res = await fetch(path, {
-      method: body === undefined ? 'GET' : 'POST',
+      method: verb,
       headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
       body: body === undefined ? undefined : JSON.stringify(body),
       cache: 'no-store',
@@ -103,6 +128,16 @@ export const apexpadApi = {
 
   stageDag: (body: StageDagRequest) =>
     request<DagExecutionState>('/api/apexpad/stage-dag', body),
+
+  /** TASK 2: compile a raw prompt into a deterministic Specification Contract. */
+  structureSpec: (body: StructureSpecRequest) =>
+    request<StructureSpecResponse>('/api/apexpad/spec-structure', body),
+
+  /** TASK 2: list recent specification contracts for a session. */
+  listSpecs: (sessionId: string) =>
+    request<ApexpadSpecListResponse>(
+      `/api/apexpad/spec-structure?sessionId=${encodeURIComponent(sessionId)}`,
+    ),
 
   resolveApproval: (body: ResolveApprovalRequest) =>
     request<ResolveApprovalResponse>('/api/apexpad/resolve-approval', body),
@@ -145,6 +180,57 @@ export const apexpadApi = {
     request<ApexpadStagedArtifactsResponse>(
       `/api/apexpad/staged-artifacts${sessionId ? `?sessionId=${encodeURIComponent(sessionId)}` : ''}`,
     ),
+
+  /* ------------------------- Slice 3: Task 3 guardrails ------------------------- */
+
+  /** TASK 3: run the anti-truncation splicer + hallucination + skew + premise gates. */
+  inspectGuardrails: (body: InspectGuardrailsRequest) =>
+    request<InspectGuardrailsResponse>('/api/apexpad/guardrails', body),
+
+  /** TASK 3: recent guardrail reports (summary view). */
+  listGuardrailReports: (sessionId?: string) =>
+    request<GuardrailReportListResponse>(
+      `/api/apexpad/guardrails${sessionId ? `?sessionId=${encodeURIComponent(sessionId)}` : ''}`,
+    ),
+
+  /* ---------------------- Slice 3: Task 4 agent-browser ---------------------- */
+
+  /** Seed/update the live page DOM state for the Agent-Browser registry. */
+  setLiveDomState: (body: SetLiveDomStateRequest) =>
+    request<SetLiveDomStateResponse>('/api/apexpad/agent-browser', body, 'PUT'),
+
+  /** Execute one Agent-Browser command (open/snapshot/click/fill/get_url/close). */
+  executeAgentBrowserCommand: (body: ExecuteAgentBrowserCommandRequest) =>
+    request<ExecuteAgentBrowserCommandResponse>('/api/apexpad/agent-browser', body),
+
+  /** Current Agent-Browser session state (live page + active RefMap + log). */
+  getBrowserSessionState: (sessionId: string) =>
+    request<GetBrowserSessionStateResponse>(
+      `/api/apexpad/agent-browser?sessionId=${encodeURIComponent(sessionId)}`,
+    ),
+
+  /* ----------------------- Slice 3: Task 4 verification ----------------------- */
+
+  /** TASK 4: run compiler gate + test gate + agent-browser loop for an artifact. */
+  runRuntimeVerification: (body: RunRuntimeVerificationRequest) =>
+    request<RunRuntimeVerificationResponse>('/api/apexpad/verify-runtime', body),
+
+  /** TASK 4: recent runtime verification reports. */
+  listRuntimeVerifications: (sessionId?: string) =>
+    request<RuntimeVerificationListResponse>(
+      `/api/apexpad/verify-runtime${sessionId ? `?sessionId=${encodeURIComponent(sessionId)}` : ''}`,
+    ),
+
+  /* --------------------------- Slice 3: §7.6 pipeline --------------------------- */
+
+  /** Run the unified 4-stage pipeline (spec -> guardrails -> DAG -> verification). */
+  runFullPipeline: (body: RunFullPipelineRequest) =>
+    request<RunFullPipelineResponse>('/api/apexpad/full-pipeline', body),
+
+  /* --------------------------- Slice 3: §7.7 E2E suite --------------------------- */
+
+  /** Run the §7.7 End-to-End Verification Suite for Tasks 2, 3 and 4. */
+  runE2eSuite: () => request<RunE2eSuiteResponse>('/api/apexpad/e2e-suite', {}),
 }
 
 /* ------------------------------ misc helpers ----------------------------- */

@@ -503,6 +503,8 @@ export class ContextEngine {
       isInteractive: boolean;
       isDisabled?: boolean;
       isVisibleInViewport?: boolean;
+      /** Loud-failure audit flag: overlay selector covering this element, if any. */
+      coveredByOverlaySelector?: string | null;
       boundingBox?: { x: number; y: number; width: number; height: number };
       domPathSelector: string;
     }>;
@@ -530,6 +532,7 @@ export class ContextEngine {
         `[ref=${refKey}]`,
         refObj.isDisabled ? '[disabled]' : '',
         !refObj.isVisibleInViewport ? '[offscreen]' : '',
+        el.coveredByOverlaySelector ? `[covered by ${el.coveredByOverlaySelector}]` : '',
       ]
         .filter(Boolean)
         .join(' ');

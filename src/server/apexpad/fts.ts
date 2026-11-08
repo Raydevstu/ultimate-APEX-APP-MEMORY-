@@ -69,6 +69,21 @@ export async function ensureFtsSetup(): Promise<void> {
     // Verify FTS5 is actually usable (some SQLite builds lack the module)
     await db.$queryRawUnsafe(`SELECT 1 FROM "observations_fts" LIMIT 1;`);
 
+    // Self-healing backfill: re-index any observations that predate the FTS table
+    // (e.g. after a schema push that dropped the virtual tables). The AFTER INSERT
+    // trigger only covers rows written after setup, so a backfill guard is required.
+    await exec(`
+      INSERT INTO "observations_fts"(
+        "obs_id", "project_slug", "title", "subtitle", "narrative", "facts_text", "referenced_files", "referenced_symbols"
+      )
+      SELECT
+        o."id", o."project_slug", o."title", o."subtitle", o."narrative", o."facts_json", o."referenced_files", o."referenced_symbols"
+      FROM "observations" o
+      WHERE NOT EXISTS (
+        SELECT 1 FROM "observations_fts" f WHERE f."obs_id" = o."id"
+      );
+    `);
+
     globalForFts.apexpadFtsAvailable = true;
   } catch (err) {
     console.warn('[apexpad] FTS5 unavailable — falling back to LIKE scoring search:', err);

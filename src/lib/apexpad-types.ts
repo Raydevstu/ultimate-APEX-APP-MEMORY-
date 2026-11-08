@@ -249,9 +249,15 @@ export type CaptureEventType =
   | 'hook:session_end'
   | 'fs:file_indexed'
   | 'fs:file_rekeyed'
+  | 'spec:structured'
   | 'agent:turn_complete'
   | 'dag:staged'
-  | 'artifact:resolved';
+  | 'artifact:resolved'
+  | 'guardrail:report'
+  | 'verify:report'
+  | 'pipeline:complete'
+  | 'browser:command'
+  | 'e2e:suite';
 
 export interface UnattendedCaptureEvent {
   eventType: CaptureEventType;

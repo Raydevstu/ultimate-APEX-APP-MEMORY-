@@ -22,6 +22,7 @@ import type {
   StagedArtifact,
   UnattendedCaptureEvent,
 } from '@/lib/apexpad-types'
+import type { StructuredSpecContract } from '@/lib/apexpad-guardrails-types'
 import { apexpadApi } from '@/lib/apexpad-client'
 import { useApexpadSse } from '@/hooks/use-apexpad-sse'
 import { useToast } from '@/hooks/use-toast'
@@ -57,6 +58,7 @@ export default function Home() {
   const [telemetry, setTelemetry] = React.useState<DashboardTelemetrySnapshot | null>(null)
   const [stagedArtifacts, setStagedArtifacts] = React.useState<StagedArtifact[]>([])
   const [dagState, setDagState] = React.useState<DagExecutionState | null>(null)
+  const [spec, setSpec] = React.useState<StructuredSpecContract | null>(null)
   const [events, setEvents] = React.useState<UnattendedCaptureEvent[]>([])
 
   const [editorContent, setEditorContent] = React.useState<string>(DEFAULT_NOTE_CONTENT)
@@ -188,9 +190,29 @@ export default function Home() {
     async (prompt: string) => {
       setAgentLoading(true)
       try {
+        // PIPELINE ORDER (Slice 1 blueprint §6.1): raw prompt → TASK 2 structurer →
+        // TASK 1 context pack + planner + agents. The spec contract is compiled first,
+        // then the normalized goal drives the contextual agent turn.
+        let effectivePrompt = prompt
+        try {
+          const structured = await apexpadApi.structureSpec({ sessionId, rawUserPrompt: prompt })
+          setSpec(structured.spec)
+          setTelemetry(structured.telemetry)
+          setRightTab('spec')
+          effectivePrompt = structured.spec.normalizedGoal
+          toast({
+            title: 'Spec contract compiled',
+            description: `${structured.spec.specId} • ${structured.spec.subtaskDag.length} subtasks • complexity: ${structured.spec.estimatedReasoningComplexity}${structured.spec.isOverloadedPromptSplit ? ' • overloaded prompt split' : ''}`,
+            ...TOAST_DARK,
+          })
+        } catch (specErr) {
+          // Non-fatal: the raw prompt still flows through the Task 1 pipeline.
+          fail(specErr)
+        }
+
         const res = await apexpadApi.agentTurn({
           sessionId,
-          userPrompt: prompt,
+          userPrompt: effectivePrompt,
           activeFilePath: APEXPAD_ACTIVE_FILE,
           editorContent,
           ...(envelope ? { tokenBudgetCeiling: envelope.tokenBudgetCeiling } : {}),
@@ -438,11 +460,14 @@ export default function Home() {
           dagState={dagState}
           stagedArtifacts={stagedArtifacts}
           events={events}
+          spec={spec}
+          sessionId={sessionId}
           tab={rightTab}
           onTabChange={setRightTab}
           onReInflateCcr={openCcr}
           onResolveApproval={resolveApproval}
           busyArtifactId={busyArtifactId}
+          onRefreshTelemetry={() => void refreshTelemetry()}
         />
       </main>
 

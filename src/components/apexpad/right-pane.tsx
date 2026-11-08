@@ -7,10 +7,12 @@
 import * as React from 'react'
 import { AnimatePresence } from 'framer-motion'
 import {
+  ArrowDown,
   Bot,
   CheckCircle2,
   FileCode,
   FileDiff,
+  FileText,
   GitBranch,
   Layers,
   Loader2,
@@ -20,12 +22,17 @@ import {
   Play,
   RefreshCw,
   Route,
+  ScrollText,
   ShieldCheck,
   Square,
   TriangleAlert,
   Wrench,
 } from 'lucide-react'
 
+import type {
+  AtomicSubtaskNode,
+  StructuredSpecContract,
+} from '@/lib/apexpad-guardrails-types'
 import type {
   CaptureEventType,
   DagExecutionState,
@@ -35,6 +42,7 @@ import type {
 } from '@/lib/apexpad-types'
 import { cn } from '@/lib/utils'
 import { formatRelativeTime, truncate } from '@/lib/apexpad-client'
+import { VerificationPanel } from '@/components/apexpad/verification-panel'
 import {
   BTN_DANGER,
   BTN_PRIMARY,
@@ -59,6 +67,7 @@ const EVENT_ICON: Record<CaptureEventType, { icon: React.ReactNode; color: strin
   'hook:session_end': { icon: <Square className="h-3 w-3" />, color: 'text-[#f85149]' },
   'fs:file_indexed': { icon: <FileCode className="h-3 w-3" />, color: 'text-[#79c0ff]' },
   'fs:file_rekeyed': { icon: <RefreshCw className="h-3 w-3" />, color: 'text-[#d2a8ff]' },
+  'spec:structured': { icon: <ScrollText className="h-3 w-3" />, color: 'text-[#79c0ff]' },
   'agent:turn_complete': { icon: <Bot className="h-3 w-3" />, color: 'text-[#7ee787]' },
   'dag:staged': { icon: <GitBranch className="h-3 w-3" />, color: 'text-[#d2a8ff]' },
   'artifact:resolved': { icon: <CheckCircle2 className="h-3 w-3" />, color: 'text-[#3fb950]' },
@@ -333,6 +342,244 @@ function ContextPackTab({ envelope }: { envelope: PackedContextEnvelope | null }
   )
 }
 
+/* --------------------------- spec contract (Task 2) --------------------------- */
+
+const AGENT_ROLE_STYLE: Record<AtomicSubtaskNode['assignedAgent'], string> = {
+  researcher: 'border-[#3fb950]/50 bg-[#3fb950]/15 text-[#3fb950]',
+  architect: 'border-[#d2a8ff]/50 bg-[#d2a8ff]/15 text-[#d2a8ff]',
+  verifier: 'border-[#d29922]/50 bg-[#d29922]/15 text-[#d29922]',
+}
+
+const COMPLEXITY_STYLE: Record<StructuredSpecContract['estimatedReasoningComplexity'], string> = {
+  low: 'border-[#3fb950]/50 bg-[#3fb950]/15 text-[#3fb950]',
+  medium: 'border-[#d29922]/50 bg-[#d29922]/15 text-[#d29922]',
+  high: 'border-[#f85149]/50 bg-[#f85149]/15 text-[#f85149]',
+}
+
+function SubtaskNodeCard({ subtask }: { subtask: AtomicSubtaskNode }) {
+  return (
+    <div className="rounded-md border border-[#30363d] bg-[#0d1117] p-2.5">
+      <div className="flex flex-wrap items-center justify-between gap-1.5">
+        <div className="flex items-center gap-1.5">
+          <span className="font-mono text-[10px] font-bold text-[#e6edf3]">
+            #{subtask.orderIndex}
+          </span>
+          <span
+            className={cn(
+              'rounded border px-1.5 py-0.5 font-mono text-[9px] uppercase',
+              AGENT_ROLE_STYLE[subtask.assignedAgent],
+            )}
+          >
+            {subtask.assignedAgent}
+          </span>
+        </div>
+        <code className="rounded border border-[#30363d] bg-[#161b22] px-1.5 py-0.5 font-mono text-[9px] text-[#8b949e]">
+          {subtask.verificationCommand}
+        </code>
+      </div>
+
+      <p className="mt-1.5 text-[11px] leading-snug text-[#c9d1d9]">{subtask.title}</p>
+
+      <div className="mt-1.5 flex flex-wrap gap-1">
+        {subtask.targetFiles.map((file) => (
+          <Chip key={file} className="font-mono text-[#79c0ff]">
+            <FileText className="h-2.5 w-2.5" />
+            {truncate(file, 34)}
+          </Chip>
+        ))}
+        {subtask.targetSymbols.slice(0, 4).map((symbol) => (
+          <Chip key={symbol} className="font-mono text-[#7ee787]">
+            {symbol}
+          </Chip>
+        ))}
+      </div>
+
+      {subtask.explicitConstraints.length > 0 ? (
+        <p className="mt-1.5 font-mono text-[9px] text-[#8b949e]">
+          {subtask.explicitConstraints.length} explicit constraint(s) attached
+        </p>
+      ) : null}
+
+      {subtask.dependsOnSubtaskIds.length > 0 ? (
+        <div className="mt-1.5 flex flex-wrap items-center gap-1">
+          <span className="font-mono text-[9px] text-[#8b949e]">depends on:</span>
+          {subtask.dependsOnSubtaskIds.map((dep) => (
+            <code
+              key={dep}
+              className="rounded border border-[#30363d] bg-[#161b22] px-1 py-0.5 font-mono text-[9px] text-[#d2a8ff]"
+            >
+              {dep.split('_sub_')[1] ? `sub_${dep.split('_sub_')[1]}` : dep}
+            </code>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+function SpecContractTab({ spec }: { spec: StructuredSpecContract | null }) {
+  if (!spec) {
+    return (
+      <div className="space-y-3">
+        <TinyLabel>Task 2 — Specification Structurer</TinyLabel>
+        <div className="rounded-md border border-dashed border-[#30363d] p-4 text-center text-xs text-[#8b949e]">
+          No Specification Contract compiled yet. Run an agent turn — every raw prompt is
+          first compiled into a deterministic PRD with a Subtask DAG, injected Project DNA
+          constraints, and acceptance criteria.
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <TinyLabel>Task 2 — Specification Structurer</TinyLabel>
+        <CopyButton text={JSON.stringify(spec, null, 2)} label="Copy Contract" />
+      </div>
+
+      <div className="flex flex-wrap items-center gap-1.5">
+        <code className="rounded border border-[#30363d] bg-[#0d1117] px-1.5 py-0.5 font-mono text-[10px] text-[#79c0ff]">
+          {spec.specId}
+        </code>
+        <span
+          className={cn(
+            'rounded border px-1.5 py-0.5 font-mono text-[9px] uppercase',
+            COMPLEXITY_STYLE[spec.estimatedReasoningComplexity],
+          )}
+        >
+          complexity: {spec.estimatedReasoningComplexity}
+        </span>
+        {spec.isOverloadedPromptSplit ? (
+          <span className="rounded border border-[#d2a8ff]/50 bg-[#d2a8ff]/15 px-1.5 py-0.5 font-mono text-[9px] uppercase text-[#d2a8ff]">
+            overloaded → split into {spec.subtaskDag.length - 2} atomic edits
+          </span>
+        ) : null}
+      </div>
+
+      <Panel className="p-3">
+        <div className="flex items-center gap-1.5">
+          <MessageSquare className="h-3 w-3 text-[#8b949e]" />
+          <TinyLabel>Raw User Prompt</TinyLabel>
+        </div>
+        <p className="mt-1.5 whitespace-pre-wrap text-[11px] leading-relaxed text-[#c9d1d9]">
+          {spec.rawUserPrompt}
+        </p>
+      </Panel>
+
+      <Panel className="p-3">
+        <TinyLabel>Normalized Goal (Atomic Step Chain)</TinyLabel>
+        <p className="mt-1.5 break-words font-mono text-[10px] leading-relaxed text-[#7ee787]">
+          {spec.normalizedGoal}
+        </p>
+      </Panel>
+
+      <Panel className="p-3">
+        <div className="flex items-center gap-1.5">
+          <TriangleAlert className="h-3 w-3 text-[#d29922]" />
+          <TinyLabel>Detected Ambiguities ({spec.detectedAmbiguities.length})</TinyLabel>
+        </div>
+        {spec.detectedAmbiguities.length === 0 ? (
+          <p className="mt-1.5 text-[10px] text-[#3fb950]">
+            No ambiguities — prompt grounded cleanly to AST symbols.
+          </p>
+        ) : (
+          <ul className="mt-1.5 space-y-1">
+            {spec.detectedAmbiguities.map((ambiguity, i) => (
+              <li
+                key={i}
+                className="rounded border border-[#d29922]/40 bg-[#d29922]/10 px-2 py-1 text-[10px] leading-snug text-[#d29922]"
+              >
+                {ambiguity}
+              </li>
+            ))}
+          </ul>
+        )}
+      </Panel>
+
+      <Panel className="p-3">
+        <div className="flex items-center gap-1.5">
+          <ShieldCheck className="h-3 w-3 text-[#7ee787]" />
+          <TinyLabel>
+            Injected Implicit Constraints ({spec.injectedImplicitConstraints.length})
+          </TinyLabel>
+        </div>
+        <ul className="mt-1.5 space-y-1">
+          {spec.injectedImplicitConstraints.map((constraint, i) => (
+            <li
+              key={i}
+              className={cn(
+                'rounded border px-2 py-1 font-mono text-[9px] leading-snug',
+                constraint.startsWith('PROJECT_DNA')
+                  ? 'border-[#d2a8ff]/40 bg-[#d2a8ff]/10 text-[#d2a8ff]'
+                  : 'border-[#30363d] bg-[#0d1117] text-[#c9d1d9]',
+              )}
+            >
+              {constraint}
+            </li>
+          ))}
+        </ul>
+      </Panel>
+
+      {spec.schemaAndSignatureContracts.length > 0 ? (
+        <Panel className="p-3">
+          <TinyLabel>
+            Signature &amp; Schema Contracts ({spec.schemaAndSignatureContracts.length})
+          </TinyLabel>
+          <div
+            className={cn(
+              'mt-1.5 max-h-40 space-y-1 overflow-y-auto rounded-md border border-[#30363d] bg-[#0d1117] p-2',
+              THIN_SCROLL,
+            )}
+          >
+            {spec.schemaAndSignatureContracts.map((contract, i) => (
+              <p
+                key={i}
+                className="break-all font-mono text-[9px] leading-relaxed text-[#a5d6ff]"
+              >
+                {contract}
+              </p>
+            ))}
+          </div>
+        </Panel>
+      ) : null}
+
+      <div>
+        <TinyLabel className="mb-1.5">
+          Subtask DAG ({spec.subtaskDag.length} atomic nodes)
+        </TinyLabel>
+        <div className="space-y-1.5">
+          {spec.subtaskDag.map((subtask, idx) => (
+            <div key={subtask.subtaskId}>
+              <SubtaskNodeCard subtask={subtask} />
+              {idx < spec.subtaskDag.length - 1 ? (
+                <div className="mx-auto flex h-3 w-px items-center justify-center bg-[#30363d]">
+                  <ArrowDown className="h-2.5 w-2.5 text-[#8b949e]" />
+                </div>
+              ) : null}
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <Panel className="p-3">
+        <div className="flex items-center gap-1.5">
+          <CheckCircle2 className="h-3 w-3 text-[#3fb950]" />
+          <TinyLabel>Acceptance Criteria ({spec.acceptanceCriteria.length})</TinyLabel>
+        </div>
+        <ul className="mt-1.5 space-y-1">
+          {spec.acceptanceCriteria.map((criterion, i) => (
+            <li key={i} className="flex items-start gap-1.5 text-[10px] leading-snug text-[#c9d1d9]">
+              <CheckCircle2 className="mt-0.5 h-3 w-3 shrink-0 text-[#3fb950]" />
+              <span>{criterion}</span>
+            </li>
+          ))}
+        </ul>
+      </Panel>
+    </div>
+  )
+}
+
 /* -------------------------------- staging -------------------------------- */
 
 function ArtifactStatusBadge({ status }: { status: StagedArtifact['status'] }) {
@@ -465,33 +712,41 @@ function StagingTab({
 
 /* ------------------------------- the pane -------------------------------- */
 
-export type RightPaneTab = 'dag' | 'pack' | 'staging'
+export type RightPaneTab = 'dag' | 'spec' | 'pack' | 'staging' | 'verify'
 
 export function RightPane({
   envelope,
   dagState,
   stagedArtifacts,
   events,
+  spec,
+  sessionId,
   tab,
   onTabChange,
   onReInflateCcr,
   onResolveApproval,
   busyArtifactId,
+  onRefreshTelemetry,
 }: {
   envelope: PackedContextEnvelope | null
   dagState: DagExecutionState | null
   stagedArtifacts: StagedArtifact[]
   events: UnattendedCaptureEvent[]
+  spec: StructuredSpecContract | null
+  sessionId: string
   tab: RightPaneTab
   onTabChange: (tab: RightPaneTab) => void
   onReInflateCcr: (ccrId: string) => void
   onResolveApproval: (artifactId: string, approved: boolean) => Promise<boolean>
   busyArtifactId: string | null
+  onRefreshTelemetry: () => void
 }) {
   const tabs: { id: RightPaneTab; label: string; count?: number }[] = [
     { id: 'dag', label: 'DAG' },
+    { id: 'spec', label: 'Spec', count: spec?.subtaskDag.length },
     { id: 'pack', label: 'Context Pack' },
     { id: 'staging', label: 'Staging', count: stagedArtifacts.length },
+    { id: 'verify', label: 'Verify' },
   ]
 
   return (
@@ -531,6 +786,11 @@ export function RightPane({
             />
           </FadeIn>
         ) : null}
+        {tab === 'spec' ? (
+          <FadeIn key="spec">
+            <SpecContractTab spec={spec} />
+          </FadeIn>
+        ) : null}
         {tab === 'pack' ? (
           <FadeIn key="pack">
             <ContextPackTab envelope={envelope} />
@@ -542,6 +802,17 @@ export function RightPane({
               stagedArtifacts={stagedArtifacts}
               busyArtifactId={busyArtifactId}
               onResolveApproval={onResolveApproval}
+            />
+          </FadeIn>
+        ) : null}
+        {tab === 'verify' ? (
+          <FadeIn key="verify">
+            <VerificationPanel
+              sessionId={sessionId}
+              stagedArtifacts={stagedArtifacts}
+              envelope={envelope}
+              onReInflateCcr={onReInflateCcr}
+              onRefreshTelemetry={onRefreshTelemetry}
             />
           </FadeIn>
         ) : null}

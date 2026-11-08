@@ -228,7 +228,7 @@ function AgentConsole({
           ) : (
             <>
               <Play className="h-3.5 w-3.5" />
-              Run Agent Turn (CONTEXT PACK → LLM)
+              Run Agent Turn (SPEC → CONTEXT PACK → LLM)
             </>
           )}
         </button>

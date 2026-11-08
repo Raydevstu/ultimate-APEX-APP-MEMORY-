@@ -187,3 +187,67 @@ model StagedArtifact {
   @@index([sessionId, createdAt], map: "idx_artifacts_session")
   @@map("staged_artifacts")
 }
+
+// 12. TASK 2: STRUCTURED SPECIFICATION CONTRACTS TABLE
+// (APEX-EDITOR-V1 Slice 1 blueprint §7.2 — Input & Specification Structurer)
+model StructuredSpec {
+  specId                  String  @id @map("spec_id")
+  sessionId               String  @map("session_id")
+  projectSlug             String  @map("project_slug")
+  rawUserPrompt           String  @map("raw_user_prompt")
+  normalizedGoal          String  @map("normalized_goal")
+  detectedAmbiguitiesJson String  @default("[]") @map("detected_ambiguities_json")
+  injectedConstraintsJson String  @default("[]") @map("injected_constraints_json")
+  schemaContractsJson     String  @default("[]") @map("schema_contracts_json")
+  subtaskDagJson          String  @default("[]") @map("subtask_dag_json")
+  acceptanceCriteriaJson  String  @default("[]") @map("acceptance_criteria_json")
+  isOverloadedSplit       Boolean @default(false) @map("is_overloaded_split")
+  reasoningComplexity     String  @map("reasoning_complexity") // low | medium | high (validated in app layer)
+  createdAt               String  @map("created_at")
+
+  @@index([sessionId, createdAt], map: "idx_specs_session")
+  @@index([projectSlug, createdAt], map: "idx_specs_project")
+  @@map("structured_specs")
+}
+
+// 13. TASK 3: MODEL GENERATION GUARDRAIL & ANTI-TRUNCATION REPORTS TABLE
+// (APEX-EDITOR-V1 Slice 1 blueprint §7.2 — schema foundation for the Task 3 codeGuard)
+model GuardrailReport {
+  guardId                   String  @id @map("guard_id")
+  sessionId                 String  @map("session_id")
+  targetFilePath            String  @map("target_file_path")
+  passedAllGates            Boolean @default(false) @map("passed_all_gates")
+  wasAutoHealed             Boolean @default(false) @map("was_auto_healed")
+  healedContent             String  @map("healed_content")
+  truncationMatchesJson     String  @default("[]") @map("truncation_matches_json")
+  recoveredSymbolsJson      String  @default("[]") @map("recovered_symbols_json")
+  hallucinatedImportsJson   String  @default("[]") @map("hallucinated_imports_json")
+  versionSkewWarningsJson   String  @default("[]") @map("version_skew_warnings_json")
+  sycophancyWarningsJson    String  @default("[]") @map("sycophancy_warnings_json")
+  createdAt                 String  @map("created_at")
+
+  @@index([sessionId, createdAt], map: "idx_guard_session")
+  @@index([targetFilePath, createdAt], map: "idx_guard_file")
+  @@map("guardrail_reports")
+}
+
+// 14. TASK 4: RUNTIME VERIFICATION & AGENT-BROWSER CDP AUDIT TABLE
+// (APEX-EDITOR-V1 Slice 1 blueprint §7.2 — schema foundation for the runtimeVerifier)
+model RuntimeVerification {
+  verificationId          String  @id @map("verification_id")
+  sessionId               String  @map("session_id")
+  artifactId              String  @map("artifact_id")
+  targetFilePath          String  @map("target_file_path")
+  typeCheckPassed         Boolean @default(false) @map("type_check_passed")
+  typeCheckDiagnosticsJson String @default("[]") @map("type_check_diagnostics_json")
+  testGatePassed          Boolean @default(false) @map("test_gate_passed")
+  executedTestFilesJson   String  @default("[]") @map("executed_test_files_json")
+  testRunnerCcrId         String? @map("test_runner_ccr_id")
+  agentBrowserResultsJson String  @default("[]") @map("agent_browser_results_json")
+  overallStatus           String  @map("overall_status") // verified_ready_for_approval | failed_verification (validated in app layer)
+  createdAt               String  @map("created_at")
+
+  @@index([sessionId, createdAt], map: "idx_verify_session")
+  @@index([artifactId], map: "idx_verify_artifact")
+  @@map("runtime_verifications")
+}
