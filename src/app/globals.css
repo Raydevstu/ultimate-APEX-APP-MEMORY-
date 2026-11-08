@@ -3,11 +3,16 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/*
+ * ApexPad Design Tokens — see DESIGN.md §3 (source of truth).
+ * Single-theme decision: the app is a dark vault-terminal by design;
+ * `:root` IS the dark theme. No light variant exists on purpose.
+ */
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --font-sans: var(--font-plex-sans);
+  --font-mono: var(--font-plex-mono);
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -41,82 +46,130 @@
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 4px);
+
+  /* ── ApexPad semantic palette (DESIGN.md §3) ─────────────────────
+     Surfaces: one hue, lightness steps only. Canvas → panel → control.
+     Ink: 4-level text hierarchy. Wire: rgba border progression.
+     Signals: color = meaning, locked. Green is for ACTIONS only. */
+  --color-vault: #0d1117;         /* surface-0 · canvas / app bg */
+  --color-vault-1: #161b22;       /* surface-1 · panel bg */
+  --color-vault-hover: #1c2128;   /* surface-1 hover */
+  --color-receipt: #21262d;       /* surface-2 · control / receipt bg */
+  --color-receipt-hover: #2d333b; /* surface-2 hover */
+  --color-well: #0a0d12;          /* inputs: darker than surroundings (inset) */
+
+  --color-ink-strong: #e6edf3;    /* headings, hero values */
+  --color-ink: #c9d1d9;           /* body */
+  --color-ink-muted: #8b949e;     /* labels, meta (≥11px/500) */
+  --color-ink-ghost: #6e7681;     /* disabled only */
+
+  --color-wire: rgb(240 246 252 / 0.1);        /* default border */
+  --color-wire-soft: rgb(240 246 252 / 0.06);  /* separation */
+  --color-wire-strong: rgb(240 246 252 / 0.16);/* emphasis */
+  --color-wire-focus: rgb(88 166 255 / 0.55);  /* focus ring only */
+
+  --color-action: #238636;        /* THE primary action bg — nothing else */
+  --color-action-hover: #2ea043;
+  --color-action-ink: #ffffff;
+  --color-signal-live: #3fb950;   /* live / success fg (SSE, gate-clear) */
+  --color-signal-gate: #d29922;   /* human decision points ONLY */
+  --color-signal-danger: #f85149; /* errors, deny, halt */
+  --color-danger-strong: #da3633; /* destructive bg */
+  --color-signal-info: #58a6ff;   /* focus ring, links, info — the ONE blue */
+  --color-signal-memory: #d2a8ff; /* CCR / memory / PPR identity */
+
+  --color-gate-wash: rgb(210 153 34 / 0.1);    /* gate surface tint */
+  --color-memory-wash: rgb(210 153 255 / 0.08);/* memory surface tint */
+
+  --color-highlight: rgb(88 166 255 / 0.16);   /* editor line-flash */
 }
 
+/* shadcn primitives remapped onto the vault world (dark by design) */
 :root {
-  --radius: 0.625rem;
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
-  --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
-  --chart-1: oklch(0.646 0.222 41.116);
-  --chart-2: oklch(0.6 0.118 184.704);
-  --chart-3: oklch(0.398 0.07 227.392);
-  --chart-4: oklch(0.828 0.189 84.429);
-  --chart-5: oklch(0.769 0.188 70.08);
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.205 0 0);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.97 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0 0);
-}
+  --radius: 0.375rem;
+  --background: #0d1117;
+  --foreground: #c9d1d9;
+  --card: #161b22;
+  --card-foreground: #c9d1d9;
+  --popover: #161b22;
+  --popover-foreground: #c9d1d9;
+  --primary: #238636;
+  --primary-foreground: #ffffff;
+  --secondary: #21262d;
+  --secondary-foreground: #c9d1d9;
+  --muted: #21262d;
+  --muted-foreground: #8b949e;
+  --accent: #1c2128;
+  --accent-foreground: #e6edf3;
+  --destructive: #da3633;
+  --border: rgb(240 246 252 / 0.1);
+  --input: rgb(240 246 252 / 0.1);
+  --ring: #58a6ff;
+  --chart-1: #58a6ff;
+  --chart-2: #3fb950;
+  --chart-3: #d29922;
+  --chart-4: #d2a8ff;
+  --chart-5: #f85149;
+  --sidebar: #0d1117;
+  --sidebar-foreground: #c9d1d9;
+  --sidebar-primary: #238636;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #1c2128;
+  --sidebar-accent-foreground: #e6edf3;
+  --sidebar-border: rgb(240 246 252 / 0.1);
+  --sidebar-ring: #58a6ff;
 
-.dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.556 0 0);
-  --chart-1: oklch(0.488 0.243 264.376);
-  --chart-2: oklch(0.696 0.17 162.48);
-  --chart-3: oklch(0.769 0.188 70.08);
-  --chart-4: oklch(0.627 0.265 303.9);
-  --chart-5: oklch(0.645 0.246 16.439);
-  --sidebar: oklch(0.205 0 0);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.556 0 0);
+  color-scheme: dark;
 }
 
 @layer base {
   * {
-    @apply border-border outline-ring/50;
+    @apply border-border;
+    -webkit-tap-highlight-color: transparent;
+  }
+  html {
+    overscroll-behavior-y: none;
   }
   body {
-    @apply bg-background text-foreground;
+    @apply bg-vault text-ink antialiased;
+    font-family: var(--font-plex-sans), ui-sans-serif, system-ui, sans-serif;
+    touch-action: manipulation;
+  }
+  /* Native controls inherit the vault world (Windows dark mode fix) */
+  select,
+  option {
+    background-color: #161b22;
+    color: #c9d1d9;
+  }
+  /* Page-level scrollbar matches the vault chrome */
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #30363d;
+    border-radius: 6px;
+    border: 2px solid #0d1117;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: #3d444d;
+  }
+  ::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+}
+
+/* Constitution AX07 — reduced motion: keep opacity/color, drop movement */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }

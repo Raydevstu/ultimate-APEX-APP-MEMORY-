@@ -2,8 +2,8 @@
 
 /**
  * src/components/apexpad/ui-kit.tsx
- * Shared GitHub-dark building blocks: class strings, tiny labels, chips,
- * status dot, thin-scrollbar wrapper, diff viewer, copy button.
+ * ApexPad building blocks — every class binds to the semantic tokens in
+ * globals.css (@theme, DESIGN.md §3). No raw hex in components.
  */
 import * as React from 'react'
 import { motion } from 'framer-motion'
@@ -15,44 +15,54 @@ import { useToast } from '@/hooks/use-toast'
 /* ----------------------------- class strings ----------------------------- */
 
 export const THIN_SCROLL =
-  '[scrollbar-width:thin] [scrollbar-color:#30363d_transparent] ' +
+  '[scrollbar-width:thin] [scrollbar-color:var(--color-receipt)_transparent] ' +
   '[&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar]:h-1.5 ' +
-  '[&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-[#30363d] ' +
+  '[&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-receipt ' +
   '[&::-webkit-scrollbar-track]:bg-transparent'
 
 export const BTN_PRIMARY =
-  'bg-[#238636] text-white hover:bg-[#2ea043] shadow-none'
+  'bg-action text-action-ink hover:bg-action-hover shadow-none'
 export const BTN_SECONDARY =
-  'border border-[#30363d] bg-[#21262d] text-[#e6edf3] hover:bg-[#30363d] shadow-none'
+  'border border-wire bg-receipt text-ink-strong hover:bg-receipt-hover shadow-none'
 export const BTN_DANGER =
-  'bg-[#da3633] text-white hover:bg-[#f85149] shadow-none'
+  'bg-danger-strong text-white hover:bg-signal-danger shadow-none'
 export const BTN_GHOST =
-  'text-[#8b949e] hover:bg-[#21262d] hover:text-[#e6edf3] shadow-none'
+  'text-ink-muted hover:bg-receipt hover:text-ink-strong shadow-none'
+
+/** Inputs are wells: darker than their surroundings (DESIGN.md §3). */
 export const INPUT_DARK =
-  'bg-[#0d1117] border-[#30363d] text-[#e6edf3] placeholder:text-[#8b949e] focus-visible:ring-[#58a6ff]/40 focus-visible:border-[#58a6ff]/60 font-mono text-xs'
+  'bg-well border-wire text-ink-strong placeholder:text-ink-muted focus-visible:ring-wire-focus focus-visible:border-signal-info/60 font-mono text-xs'
 
 export const TOAST_DARK = {
-  className: 'bg-[#161b22] border-[#30363d] text-[#e6edf3]',
+  className: 'bg-vault-1 border-wire text-ink-strong',
 } as const
 
 /* ------------------------------ tiny pieces ------------------------------ */
 
+/**
+ * Receipt-style meta label. Mono, tracked, uppercase — the ONLY place
+ * uppercase+tracking is allowed (DESIGN.md §4). Renders a real heading
+ * element when `as` is provided (Constitution AX06 heading ladder).
+ */
 export function TinyLabel({
   children,
   className,
+  as,
 }: {
   children: React.ReactNode
   className?: string
+  as?: 'h1' | 'h2' | 'h3'
 }) {
+  const Tag = as ?? 'div'
   return (
-    <div
+    <Tag
       className={cn(
-        'text-[10px] font-semibold uppercase tracking-[0.14em] text-[#8b949e]',
+        'font-mono text-[11px] font-medium uppercase tracking-[0.14em] text-ink-muted',
         className,
       )}
     >
       {children}
-    </div>
+    </Tag>
   )
 }
 
@@ -66,7 +76,7 @@ export function Panel({
   return (
     <div
       className={cn(
-        'rounded-lg border border-[#30363d] bg-[#161b22]',
+        'rounded-md border border-wire bg-vault-1',
         className,
       )}
     >
@@ -75,6 +85,7 @@ export function Panel({
   )
 }
 
+/** Data chip (hashes, counts) — chips are DATA, never actions. */
 export function Chip({
   children,
   className,
@@ -88,7 +99,7 @@ export function Chip({
     <span
       title={title}
       className={cn(
-        'inline-flex items-center gap-1 rounded-md border border-[#30363d] bg-[#161b22] px-1.5 py-0.5 text-[11px] leading-none text-[#8b949e] whitespace-nowrap',
+        'inline-flex items-center gap-1 rounded border border-wire bg-vault-1 px-1.5 py-0.5 font-mono text-[11px] font-medium leading-none text-ink-muted tabular-nums whitespace-nowrap',
         className,
       )}
     >
@@ -97,16 +108,42 @@ export function Chip({
   )
 }
 
+/**
+ * Receipt chip (DESIGN.md §6 signature): sha prefix + provenance voice.
+ * Violet on memory wash — the CCR/memory identity color.
+ */
+export function HashChip({
+  hash,
+  className,
+  title,
+}: {
+  hash: string
+  className?: string
+  title?: string
+}) {
+  return (
+    <span
+      title={title ?? `receipt ${hash}`}
+      className={cn(
+        'inline-flex items-center rounded border border-signal-memory/30 bg-memory-wash px-1.5 py-0.5 font-mono text-[11px] font-medium leading-none text-signal-memory tabular-nums',
+        className,
+      )}
+    >
+      {hash.length > 9 ? `${hash.slice(0, 7)}…` : hash}
+    </span>
+  )
+}
+
 export function StatusDot({ connected }: { connected: boolean }) {
   return (
     <span className="relative inline-flex h-2.5 w-2.5" aria-hidden>
       {connected && (
-        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[#3fb950] opacity-60" />
+        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-signal-live opacity-60" />
       )}
       <span
         className={cn(
           'relative inline-flex h-2.5 w-2.5 rounded-full',
-          connected ? 'bg-[#3fb950]' : 'bg-[#f85149]',
+          connected ? 'bg-signal-live' : 'bg-signal-danger',
         )}
       />
     </span>
@@ -144,29 +181,111 @@ export function CopyButton({
     <button
       type="button"
       onClick={copy}
+      aria-label={copied ? 'Copied' : label}
       className={cn(
-        'inline-flex items-center gap-1 rounded-md border border-[#30363d] bg-[#21262d] px-1.5 py-0.5 text-[10px] text-[#8b949e] hover:bg-[#30363d] hover:text-[#e6edf3]',
+        'relative inline-flex items-center gap-1 rounded border border-wire bg-receipt px-2 py-1 font-mono text-[11px] font-medium text-ink-muted hover:bg-receipt-hover hover:text-ink-strong focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-wire-focus',
+        /* extend the hit area to ~44px without inflating the visual */
+        'after:absolute after:-inset-2 after:content-[""]',
         className,
       )}
     >
       {copied ? (
-        <Check className="h-3 w-3 text-[#3fb950]" />
+        <Check className="h-3 w-3 text-signal-live" aria-hidden />
       ) : (
-        <Copy className="h-3 w-3" />
+        <Copy className="h-3 w-3" aria-hidden />
       )}
       {copied ? 'Copied' : label}
     </button>
   )
 }
 
+/* ------------------------- accessible tab strip --------------------------- */
+
+export interface TabItem {
+  id: string
+  label: React.ReactNode
+}
+
+/**
+ * The ONE tab pattern (DESIGN.md §6): full tablist semantics, roving
+ * tabIndex, arrow-key navigation. All pane tab strips use this.
+ */
+export function TabStrip({
+  items,
+  active,
+  onChange,
+  idPrefix,
+  ariaLabel,
+  className,
+}: {
+  items: TabItem[]
+  active: string
+  onChange: (id: string) => void
+  idPrefix: string
+  ariaLabel: string
+  className?: string
+}) {
+  const refs = React.useRef<(HTMLButtonElement | null)[]>([])
+
+  const onKeyDown = (event: React.KeyboardEvent, index: number) => {
+    let next: number | null = null
+    if (event.key === 'ArrowRight') next = (index + 1) % items.length
+    if (event.key === 'ArrowLeft') next = (index - 1 + items.length) % items.length
+    if (event.key === 'Home') next = 0
+    if (event.key === 'End') next = items.length - 1
+    if (next !== null) {
+      event.preventDefault()
+      onChange(items[next].id)
+      refs.current[next]?.focus()
+    }
+  }
+
+  return (
+    <div
+      role="tablist"
+      aria-label={ariaLabel}
+      className={cn('flex items-stretch gap-0.5', className)}
+    >
+      {items.map((item, index) => {
+        const selected = item.id === active
+        return (
+          <button
+            key={item.id}
+            ref={(el) => {
+              refs.current[index] = el
+            }}
+            type="button"
+            role="tab"
+            id={`${idPrefix}-tab-${item.id}`}
+            aria-selected={selected}
+            aria-controls={`${idPrefix}-panel-${item.id}`}
+            tabIndex={selected ? 0 : -1}
+            onKeyDown={(e) => onKeyDown(e, index)}
+            onClick={() => onChange(item.id)}
+            className={cn(
+              'min-h-[36px] rounded-t-md border-b-2 px-2.5 py-1.5 text-xs font-medium transition-[color,background-color,border-color] duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-wire-focus',
+              selected
+                ? 'border-signal-info bg-vault-1 text-ink-strong'
+                : 'border-transparent text-ink-muted hover:bg-vault-hover hover:text-ink',
+            )}
+          >
+            {item.label}
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
 /* ------------------------------ diff viewer ------------------------------ */
 
 function diffLineClass(line: string): string {
-  if (line.startsWith('+')) return 'text-[#3fb950] bg-[#3fb950]/10'
-  if (line.startsWith('-')) return 'text-[#f85149] bg-[#f85149]/10'
-  if (line.startsWith('@@')) return 'text-[#79c0ff]'
-  if (line.startsWith('diff ') || line.startsWith('index ')) return 'text-[#8b949e]'
-  return 'text-[#8b949e]'
+  /* V05: color always paired with the +/-/@ glyph itself */
+  if (line.startsWith('+')) return 'text-signal-live bg-signal-live/10'
+  if (line.startsWith('-')) return 'text-signal-danger bg-signal-danger/10'
+  if (line.startsWith('@@')) return 'text-signal-info'
+  if (line.startsWith('diff ') || line.startsWith('index ')) return 'text-ink-muted'
+  return 'text-ink-muted'
 }
 
 export function DiffView({ diff, className }: { diff: string; className?: string }) {
@@ -174,7 +293,7 @@ export function DiffView({ diff, className }: { diff: string; className?: string
   return (
     <pre
       className={cn(
-        'overflow-x-auto rounded-md border border-[#30363d] bg-[#0d1117] p-2 font-mono text-[10px] leading-[1.5]',
+        'overflow-x-auto rounded-md border border-wire bg-vault p-2 font-mono text-[11px] leading-[1.55] tabular-nums',
         THIN_SCROLL,
         className,
       )}
@@ -189,6 +308,8 @@ export function DiffView({ diff, className }: { diff: string; className?: string
 }
 
 /* --------------------------- animated reveal ----------------------------- */
+/* Durations within the 150–300ms budget (DESIGN.md §10); reduced motion
+   is handled globally (globals.css block + MotionConfig in page.tsx). */
 
 export function FadeIn({
   children,

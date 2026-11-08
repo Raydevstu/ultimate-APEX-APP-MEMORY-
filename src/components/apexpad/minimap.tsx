@@ -3,38 +3,51 @@
 /**
  * src/components/apexpad/minimap.tsx
  * PHASE 10 (GAP #4 / blueprint ITEM 4C): Real interactive HTML5 Canvas Code
- * Minimap — completely replaces the previous DOM-bar `Minimap (stub)`.
+ * Minimap.
  *
  * Rendering contract (blueprint §ITEM 4C):
  *   • high-DPI (`devicePixelRatio`-scaled) `<canvas>` — never blurred,
  *   • per-line syntax/heading density bars, color-coded:
- *       markdown headings → cyan, [[wiki backlinks]] → purple, pipeline
- *       architecture keywords → emerald, code symbol declarations → amber,
- *       high-cyclomatic symbol spans → red, prose → slate,
+ *       markdown headings → info, [[wiki backlinks]] → memory, pipeline
+ *       architecture keywords → live, code symbol declarations → gate,
+ *       high-cyclomatic symbol spans → danger, prose → wire,
  *   • LIVE viewport lens overlay tracking the editor scroll position,
  *   • click OR drag anywhere on the canvas to jump/scroll the editor to the
- *     corresponding line (1..N) — fully pointer-interactive.
+ *     corresponding line (1..N),
+ *   • fully keyboard-navigable (↑/↓ step, PgUp/PgDn page, Home/End).
+ *
+ * Colors derive from CANVAS_PALETTE (constants.ts) — the canvas mirror of
+ * the CSS design tokens. No raw hex outside that mirror.
  */
 
 import * as React from 'react'
 
 import type { AstSymbolNode } from '@/lib/apexpad-types'
 import { cn } from '@/lib/utils'
-import { EDITOR_LINE_HEIGHT_PX } from './constants'
+import { CANVAS_PALETTE, EDITOR_LINE_HEIGHT_PX } from './constants'
 
 const MINIMAP_WIDTH_CSS = 76
 const MIN_LINE_BAR_PX = 1.5
 
+/** Build `rgb(r g b / a)` from a #rrggbb hex (canvas-safe). */
+function alpha(hex: string, a: number): string {
+  const value = hex.replace('#', '')
+  const r = parseInt(value.slice(0, 2), 16)
+  const g = parseInt(value.slice(2, 4), 16)
+  const b = parseInt(value.slice(4, 6), 16)
+  return `rgb(${r} ${g} ${b} / ${a})`
+}
+
 const MINIMAP_COLORS = {
-  heading: '#58a6ff', // cyan — headings
-  backlink: '#d2a8ff', // purple — [[wiki backlinks]]
-  pipeline: '#7ee787', // emerald — pipeline architecture keywords
-  symbol: '#d29922', // amber — code symbol declarations
-  hot: '#f85149', // red — high cyclomatic complexity spans
-  prose: '#30363d', // slate — standard prose/code
-  lensFill: 'rgba(88, 166, 255, 0.14)',
-  lensStroke: '#58a6ff',
-  background: '#0d1117',
+  heading: CANVAS_PALETTE.signalInfo, // info — headings
+  backlink: CANVAS_PALETTE.signalMemory, // memory — [[wiki backlinks]]
+  pipeline: CANVAS_PALETTE.signalLive, // live — pipeline architecture keywords
+  symbol: CANVAS_PALETTE.signalGate, // gate — code symbol declarations
+  hot: CANVAS_PALETTE.signalDanger, // danger — high cyclomatic complexity spans
+  prose: CANVAS_PALETTE.wire, // wire — standard prose/code
+  lensFill: alpha(CANVAS_PALETTE.signalInfo, 0.14),
+  lensStroke: CANVAS_PALETTE.signalInfo,
+  background: CANVAS_PALETTE.vault,
 } as const
 
 const PIPELINE_KEYWORDS =
@@ -176,45 +189,76 @@ export function InteractiveCodeMinimap({
     [lines.length, onSelectLine],
   )
 
+  const currentLine = Math.floor(scrollTop / EDITOR_LINE_HEIGHT_PX)
+
+  const onKeyDown = (event: React.KeyboardEvent) => {
+    const stepLines = Math.max(1, Math.round(viewportHeightPx / EDITOR_LINE_HEIGHT_PX) - 1)
+    let target: number | null = null
+    if (event.key === 'ArrowDown') target = currentLine + 1
+    if (event.key === 'ArrowUp') target = currentLine - 1
+    if (event.key === 'PageDown') target = currentLine + stepLines
+    if (event.key === 'PageUp') target = currentLine - stepLines
+    if (event.key === 'Home') target = 0
+    if (event.key === 'End') target = lines.length - 1
+    if (target !== null) {
+      event.preventDefault()
+      onSelectLine(Math.max(0, Math.min(lines.length - 1, target)))
+    }
+  }
+
   return (
     <div
       ref={wrapRef}
-      className="hidden w-[76px] shrink-0 flex-col border-l border-[#30363d] bg-[#0d1117] md:flex"
+      className="hidden w-[76px] shrink-0 flex-col border-l border-wire bg-vault md:flex"
     >
       <div
-        className="py-1.5 text-center font-mono text-[9px] uppercase tracking-wide text-[#8b949e]"
-        title="Interactive canvas minimap — click or drag to navigate"
+        className="py-1.5 text-center font-mono text-[11px] font-medium uppercase tracking-wide text-ink-muted"
+        title="Interactive canvas minimap — click, drag, or use arrow keys to navigate"
       >
-        Minimap ({lines.length}L)
+        Minimap ({lines.length}
+        L)
       </div>
       <div className="min-h-0 flex-1 px-1 pb-2">
-        <canvas
-          ref={canvasRef}
-          role="img"
-          aria-label={`Interactive code minimap with ${lines.length} lines. Click or drag to navigate.`}
-          className={cn('block cursor-pointer rounded-sm border border-[#21262d]')}
-          onMouseDown={(e) => {
-            isDraggingRef.current = true
-            mapPointerToLine(e.clientY)
-          }}
-          onMouseMove={(e) => {
-            if (isDraggingRef.current) mapPointerToLine(e.clientY)
-          }}
-          onMouseUp={() => {
-            isDraggingRef.current = false
-          }}
-          onMouseLeave={() => {
-            isDraggingRef.current = false
-          }}
-          onTouchStart={(e) => {
-            const touch = e.touches[0]
-            if (touch) mapPointerToLine(touch.clientY)
-          }}
-          onTouchMove={(e) => {
-            const touch = e.touches[0]
-            if (touch) mapPointerToLine(touch.clientY)
-          }}
-        />
+        <div
+          tabIndex={0}
+          role="group"
+          aria-label={`Code minimap, ${lines.length} lines. Arrow keys step, Page Up and Page Down page, Home and End jump.`}
+          onKeyDown={onKeyDown}
+          className="h-full rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-wire-focus"
+        >
+          <canvas
+            ref={canvasRef}
+            role="img"
+            aria-label={`Interactive code minimap with ${lines.length} lines. Click or drag to navigate.`}
+            className={cn(
+              'block h-full w-full cursor-pointer touch-none rounded-sm border border-receipt select-none',
+            )}
+            onMouseDown={(e) => {
+              isDraggingRef.current = true
+              mapPointerToLine(e.clientY)
+            }}
+            onMouseMove={(e) => {
+              if (isDraggingRef.current) mapPointerToLine(e.clientY)
+            }}
+            onMouseUp={() => {
+              isDraggingRef.current = false
+            }}
+            onMouseLeave={() => {
+              isDraggingRef.current = false
+            }}
+            onTouchStart={(e) => {
+              const touch = e.touches[0]
+              if (touch) mapPointerToLine(touch.clientY)
+            }}
+            onTouchMove={(e) => {
+              const touch = e.touches[0]
+              if (touch) mapPointerToLine(touch.clientY)
+            }}
+            onTouchEnd={() => {
+              isDraggingRef.current = false
+            }}
+          />
+        </div>
       </div>
     </div>
   )

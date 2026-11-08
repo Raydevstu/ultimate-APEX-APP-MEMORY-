@@ -27,6 +27,12 @@ import type {
 import { cn } from '@/lib/utils'
 import { prettyJson } from '@/lib/apexpad-client'
 import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
+import {
   EDITOR_LINE_HEIGHT_PX,
 } from './constants'
 import { InteractiveCodeMinimap } from './minimap'
@@ -53,23 +59,17 @@ function ToolOutputDialog({
   result: ModelToolCallResult | null
   onClose: () => void
 }) {
-  if (!result) return null
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-      <button
-        type="button"
-        aria-label="Close tool output"
-        className="absolute inset-0 bg-black/60"
-        onClick={onClose}
-      />
-      <Panel className="relative z-10 max-h-[70vh] w-full max-w-lg overflow-hidden p-4">
-        <TinyLabel className="mb-2">Tool Call Output</TinyLabel>
-        <div className="mb-2 flex items-center justify-between gap-2">
-          <span className="font-mono text-xs text-[#79c0ff]">{result.toolName}</span>
-          <Chip className="font-mono">{result.tokensConsumed} tok</Chip>
-        </div>
+    <Dialog open={result !== null} onOpenChange={(next) => (next ? undefined : onClose())}>
+      <DialogContent className="max-h-[70vh] overflow-hidden border-wire bg-vault-1 p-4">
+        <DialogHeader className="space-y-0">
+          <DialogTitle className="flex items-center justify-between gap-2 font-mono text-xs font-bold text-ink-strong">
+            <span className="text-signal-info">{result?.toolName}</span>
+            <Chip className="font-mono tabular-nums">{result?.tokensConsumed} tok</Chip>
+          </DialogTitle>
+        </DialogHeader>
         <DiffView
-          diff={prettyJson(result.outputJson)}
+          diff={result ? prettyJson(result.outputJson) : ''}
           className="max-h-[45vh] overflow-y-auto"
         />
         <button
@@ -79,8 +79,8 @@ function ToolOutputDialog({
         >
           Close
         </button>
-      </Panel>
-    </div>
+      </DialogContent>
+    </Dialog>
   )
 }
 
@@ -129,16 +129,16 @@ function AgentConsole({
     <Panel className="p-3">
       <div className="mb-2 flex items-center justify-between gap-2">
         <div className="flex items-center gap-1.5">
-          <Bot className="h-3.5 w-3.5 text-[#7ee787]" />
+          <Bot className="h-3.5 w-3.5 text-signal-live" />
           <TinyLabel>Agent Console</TinyLabel>
         </div>
         {agentResult ? (
           <span
             className={cn(
-              'rounded border px-1.5 py-0.5 font-mono text-[9px] uppercase',
+              'rounded border px-1.5 py-0.5 font-mono text-[11px] uppercase',
               agentResult.llmMode === 'sdk'
-                ? 'border-[#d2a8ff]/50 bg-[#d2a8ff]/15 text-[#d2a8ff]'
-                : 'border-[#d29922]/50 bg-[#d29922]/15 text-[#d29922]',
+                ? 'border-signal-memory/50 bg-signal-memory/15 text-signal-memory'
+                : 'border-signal-gate/50 bg-signal-gate/15 text-signal-gate',
             )}
           >
             {agentResult.llmMode === 'sdk' ? 'Z.ai SDK' : 'Offline Synthesizer'}
@@ -150,9 +150,12 @@ function AgentConsole({
         value={prompt}
         onChange={(e) => setPrompt(e.target.value)}
         rows={2}
+        aria-label="Agent prompt"
+        autoComplete="off"
+        spellCheck={false}
         placeholder="Ask the agent to refactor, analyze, or extend this note…"
         className={cn(
-          'w-full resize-none rounded-md border border-[#30363d] bg-[#0d1117] px-3 py-2 text-[13px] text-[#e6edf3] placeholder:text-[#8b949e] outline-none focus:border-[#58a6ff]/60 focus:ring-2 focus:ring-[#58a6ff]/30',
+          'w-full resize-none rounded-md border border-wire bg-vault px-3 py-2 text-[13px] text-ink-strong placeholder:text-ink-muted outline-none focus-visible:border-signal-info/60 focus-visible:ring-2 focus-visible:ring-signal-info/30',
           THIN_SCROLL,
         )}
       />
@@ -169,12 +172,12 @@ function AgentConsole({
         >
           {agentLoading ? (
             <>
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              Running… {elapsed}s
+              <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+              Running… <span className="tabular-nums">{elapsed}s</span>
             </>
           ) : (
             <>
-              <Play className="h-3.5 w-3.5" />
+              <Play className="h-3.5 w-3.5" aria-hidden />
               Run Agent Turn (SPEC → CONTEXT PACK → LLM)
             </>
           )}
@@ -190,9 +193,9 @@ function AgentConsole({
           )}
         >
           {stageOpen ? (
-            <ChevronDown className="h-3.5 w-3.5" />
+            <ChevronDown className="h-3.5 w-3.5" aria-hidden />
           ) : (
-            <ChevronRight className="h-3.5 w-3.5" />
+            <ChevronRight className="h-3.5 w-3.5" aria-hidden />
           )}
           Stage as DAG Edit
         </button>
@@ -207,15 +210,19 @@ function AgentConsole({
             transition={{ duration: 0.18, ease: 'easeOut' }}
             className="overflow-hidden"
           >
-            <div className="mt-2 flex gap-2 rounded-md border border-[#30363d] bg-[#0d1117] p-2">
+            <div className="mt-2 flex gap-2 rounded-md border border-wire bg-vault p-2">
               <input
                 value={userGoal}
                 onChange={(e) => setUserGoal(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') void submitStage()
                 }}
-                placeholder="userGoal for the DAG run (e.g. 'tighten the budget invariants')"
-                className={cn(INPUT_DARK, 'h-9 flex-1 rounded-md border px-2 text-[11px] outline-none focus:ring-2')}
+                aria-label="User goal for the DAG stage run"
+                name="apexpad-user-goal"
+                autoComplete="off"
+                spellCheck={false}
+                placeholder="userGoal for the DAG run, e.g. tighten the budget invariants…"
+                className={cn(INPUT_DARK, 'h-9 flex-1 rounded-md border px-2 text-[11px]')}
               />
               <button
                 type="button"
@@ -242,7 +249,7 @@ function AgentConsole({
             </div>
             <pre
               className={cn(
-                'max-h-56 overflow-y-auto whitespace-pre-wrap rounded-md border border-[#30363d] bg-[#0d1117] p-3 pr-16 font-mono text-[11px] leading-relaxed text-[#c9d1d9]',
+                'max-h-56 overflow-y-auto whitespace-pre-wrap rounded-md border border-wire bg-vault p-3 pr-16 font-mono text-[11px] leading-relaxed text-ink',
                 THIN_SCROLL,
               )}
             >
@@ -256,14 +263,14 @@ function AgentConsole({
                 key={`${call.toolName}-${i}`}
                 type="button"
                 onClick={() => setToolDialog(call)}
-                title="Show tool output JSON"
-                className="inline-flex items-center gap-1 rounded border border-[#58a6ff]/40 bg-[#58a6ff]/10 px-1.5 py-0.5 font-mono text-[10px] text-[#79c0ff] hover:bg-[#58a6ff]/20"
+                aria-label={`Show tool output JSON for ${call.toolName}`}
+                className="inline-flex min-h-[28px] items-center gap-1 rounded border border-signal-info/40 bg-signal-info/10 px-1.5 font-mono text-[11px] text-signal-info hover:bg-signal-info/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-wire-focus"
               >
-                <Wrench className="h-2.5 w-2.5" />
+                <Wrench className="h-2.5 w-2.5" aria-hidden />
                 {call.toolName} ({call.tokensConsumed} tok)
               </button>
             ))}
-            <Chip className="border-[#3fb950]/40 bg-[#3fb950]/10 text-[#3fb950]">
+            <Chip className="border-signal-live/40 bg-signal-live/10 text-signal-live">
               <Eye className="h-2.5 w-2.5" />
               {agentResult.storedInlineObservations.length} inline obs stored
             </Chip>
@@ -308,11 +315,11 @@ function HookSimulator({
         className="flex w-full items-center gap-1.5 text-left"
       >
         {open ? (
-          <ChevronDown className="h-3.5 w-3.5 text-[#8b949e]" />
+          <ChevronDown className="h-3.5 w-3.5 text-ink-muted" />
         ) : (
-          <ChevronRight className="h-3.5 w-3.5 text-[#8b949e]" />
+          <ChevronRight className="h-3.5 w-3.5 text-ink-muted" />
         )}
-        <FlaskConical className="h-3.5 w-3.5 text-[#d29922]" />
+        <FlaskConical className="h-3.5 w-3.5 text-signal-gate" />
         <TinyLabel>Simulate PostToolUse Hook</TinyLabel>
       </button>
 
@@ -329,16 +336,24 @@ function HookSimulator({
               <input
                 value={toolName}
                 onChange={(e) => setToolName(e.target.value)}
-                placeholder="tool name"
-                className={cn(INPUT_DARK, 'h-9 w-full rounded-md border px-2 text-[11px] outline-none focus:ring-2')}
+                aria-label="Tool name to simulate"
+                name="apexpad-hook-tool-name"
+                autoComplete="off"
+                spellCheck={false}
+                placeholder="tool name…"
+                className={cn(INPUT_DARK, 'h-9 w-full rounded-md border px-2 text-[11px]')}
               />
               <textarea
                 value={toolOutput}
                 onChange={(e) => setToolOutput(e.target.value)}
                 rows={3}
+                aria-label="Raw tool output to compress"
+                name="apexpad-hook-tool-output"
+                autoComplete="off"
+                spellCheck={false}
                 placeholder="raw tool output to compress…"
                 className={cn(
-                  'w-full resize-none rounded-md border border-[#30363d] bg-[#0d1117] px-2 py-2 font-mono text-[11px] text-[#e6edf3] placeholder:text-[#8b949e] outline-none focus:border-[#58a6ff]/60 focus:ring-2 focus:ring-[#58a6ff]/30',
+                  'w-full resize-none rounded-md border border-wire bg-vault px-2 py-2 font-mono text-[11px] text-ink-strong placeholder:text-ink-muted outline-none focus-visible:border-signal-info/60 focus-visible:ring-2 focus-visible:ring-signal-info/30',
                   THIN_SCROLL,
                 )}
               />
@@ -352,9 +367,9 @@ function HookSimulator({
                 )}
               >
                 {sending ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
                 ) : (
-                  <Terminal className="h-3.5 w-3.5" />
+                  <Terminal className="h-3.5 w-3.5" aria-hidden />
                 )}
                 Send Hook → CCR Compress
               </button>
@@ -399,6 +414,25 @@ export function CenterPane({
   const [viewportHeightPx, setViewportHeightPx] = React.useState(340)
   const [flash, setFlash] = React.useState<{ nonce: number; top: number } | null>(null)
   const editorWrapRef = React.useRef<HTMLDivElement | null>(null)
+  const scrollRafRef = React.useRef<number | null>(null)
+
+  /* rAF-throttled scroll sync: one update per frame instead of one
+     setState per scroll event (perf finding, DESIGN_AUDIT §11). */
+  const handleEditorScroll = React.useCallback((e: React.UIEvent<HTMLTextAreaElement>) => {
+    const next = e.currentTarget.scrollTop
+    if (scrollRafRef.current !== null) return
+    scrollRafRef.current = requestAnimationFrame(() => {
+      scrollRafRef.current = null
+      setScrollTop(next)
+    })
+  }, [])
+
+  React.useEffect(
+    () => () => {
+      if (scrollRafRef.current !== null) cancelAnimationFrame(scrollRafRef.current)
+    },
+    [],
+  )
 
   const lines = React.useMemo(() => editorContent.split('\n'), [editorContent])
   const stats = React.useMemo(() => {
@@ -450,19 +484,19 @@ export function CenterPane({
   return (
     <section className="flex min-h-0 flex-col gap-3 lg:h-full lg:overflow-hidden">
       {/* editor panel */}
-      <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-[#30363d] bg-[#161b22]">
-        <div className="flex shrink-0 items-center justify-between gap-3 border-b border-[#30363d] px-3 py-2">
-          <span className="truncate font-mono text-xs text-[#58a6ff]">
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-wire bg-vault-1">
+        <div className="flex shrink-0 items-center justify-between gap-3 border-b border-wire px-3 py-2">
+          <span className="truncate font-mono text-xs text-signal-info">
             {activeFilePath}
           </span>
           <div className="flex shrink-0 items-center gap-2">
             {indexing ? (
-              <span className="inline-flex items-center gap-1 font-mono text-[10px] text-[#d29922]">
-                <Loader2 className="h-3 w-3 animate-spin" />
+              <span className="inline-flex items-center gap-1 font-mono text-[11px] text-signal-gate" role="status">
+                <Loader2 className="h-3 w-3 animate-spin" aria-hidden />
                 indexing…
               </span>
             ) : null}
-            <span className="hidden font-mono text-[10px] text-[#8b949e] sm:inline">
+            <span className="hidden font-mono text-[11px] text-ink-muted tabular-nums sm:inline">
               Lines: {stats.lines} · Words: {stats.words} · Chars: {stats.chars}
             </span>
           </div>
@@ -474,10 +508,11 @@ export function CenterPane({
               ref={textareaRef}
               value={editorContent}
               onChange={(e) => onEditorChange(e.target.value)}
-              onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
+              onScroll={handleEditorScroll}
               spellCheck={false}
+              aria-label="Note editor — active file content"
               className={cn(
-                'min-h-[320px] w-full resize-none bg-transparent py-3 pl-4 pr-3 font-mono text-[13px] leading-[1.6] text-[#e6edf3] outline-none lg:min-h-0 lg:h-full',
+                'min-h-[320px] w-full resize-none bg-transparent py-3 pl-4 pr-3 font-mono text-[13px] leading-[1.6] text-ink-strong outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-wire-focus lg:min-h-0 lg:h-full',
                 THIN_SCROLL,
               )}
             />
@@ -489,8 +524,8 @@ export function CenterPane({
                   initial={{ opacity: 0.85 }}
                   animate={{ opacity: 0 }}
                   exit={{ opacity: 0 }}
-                  transition={{ duration: 1.0, ease: 'easeOut' }}
-                  className="pointer-events-none absolute left-0 right-0 h-[21px] rounded-sm border-y border-[#58a6ff]/50 bg-[#58a6ff]/15"
+                  transition={{ duration: 0.32, ease: 'easeOut' }}
+                  className="pointer-events-none absolute left-0 right-0 h-[21px] rounded-sm border-y border-signal-info/50 bg-signal-info/15"
                   style={{ top: flash.top }}
                 />
               ) : null}

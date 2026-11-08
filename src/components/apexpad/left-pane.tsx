@@ -27,6 +27,7 @@ import {
   FadeIn,
   INPUT_DARK,
   Panel,
+  TabStrip,
   THIN_SCROLL,
   TinyLabel,
 } from './ui-kit'
@@ -54,7 +55,7 @@ function OutlineTab({
     <div className="space-y-2">
       <TinyLabel>Headings • Backlinks • Ripwire PPR Rank</TinyLabel>
       {fileSymbols.length === 0 ? (
-        <div className="rounded-md border border-dashed border-[#30363d] p-4 text-center text-xs text-[#8b949e]">
+        <div className="rounded-md border border-dashed border-wire p-4 text-center text-xs text-ink-muted">
           No symbols indexed for this file yet.
         </div>
       ) : (
@@ -67,19 +68,19 @@ function OutlineTab({
                 type="button"
                 onClick={() => onJumpToLine(symbol.startLine)}
                 className={cn(
-                  'block w-full rounded-md border border-transparent bg-[#161b22] px-2.5 py-2 text-left transition-colors hover:border-[#30363d] hover:bg-[#1c2128]',
-                  hot ? 'border-l-[3px] border-l-[#f85149]' : 'border-l-[3px] border-l-[#3fb950]',
+                  'block w-full rounded-md border border-transparent bg-vault-1 px-2.5 py-2 text-left transition-colors hover:border-wire hover:bg-vault-hover',
+                  hot ? 'border-l-[3px] border-l-signal-danger' : 'border-l-[3px] border-l-signal-live',
                 )}
               >
                 <div className="flex items-baseline justify-between gap-2">
-                  <span className="truncate text-[13px] font-semibold text-[#e6edf3]">
+                  <span className="truncate text-[13px] font-semibold text-ink-strong">
                     {symbol.symbolName}
                   </span>
-                  <span className="shrink-0 font-mono text-[10px] text-[#58a6ff]">
+                  <span className="shrink-0 font-mono text-[11px] text-signal-info">
                     PPR: {symbol.pageRankScore.toFixed(1)}
                   </span>
                 </div>
-                <div className="mt-0.5 font-mono text-[10px] text-[#8b949e]">
+                <div className="mt-0.5 font-mono text-[11px] text-ink-muted">
                   L{symbol.startLine}-L{symbol.endLine} • {symbol.kind} • CX:
                   {symbol.cyclomaticComplexity}
                 </div>
@@ -95,16 +96,16 @@ function OutlineTab({
 /* --------------------------------- dna ----------------------------------- */
 
 const DNA_CATEGORY_STYLE: Record<ProjectDnaRule['category'], string> = {
-  architecture: 'border-[#1f6feb]/40 bg-[#1f6feb]/15 text-[#79c0ff]',
-  convention: 'border-[#30363d] bg-[#21262d] text-[#8b949e]',
-  forbidden_pattern: 'border-[#f85149]/40 bg-[#f85149]/15 text-[#f85149]',
-  environment_fact: 'border-[#d29922]/40 bg-[#d29922]/15 text-[#d29922]',
+  architecture: 'border-signal-info/40 bg-signal-info/15 text-signal-info',
+  convention: 'border-wire bg-receipt text-ink-muted',
+  forbidden_pattern: 'border-signal-danger/40 bg-signal-danger/15 text-signal-danger',
+  environment_fact: 'border-signal-gate/40 bg-signal-gate/15 text-signal-gate',
 }
 
 function DnaTab({ dnaRules }: { dnaRules: ProjectDnaRule[] }) {
   if (dnaRules.length === 0) {
     return (
-      <div className="rounded-md border border-dashed border-[#30363d] p-4 text-center text-xs text-[#8b949e]">
+      <div className="rounded-md border border-dashed border-wire p-4 text-center text-xs text-ink-muted">
         No DNA rules confirmed yet. Run agent turns to distill rules.
       </div>
     )
@@ -114,33 +115,33 @@ function DnaTab({ dnaRules }: { dnaRules: ProjectDnaRule[] }) {
       {dnaRules.map((rule) => (
         <Panel key={rule.id} className="p-3">
           <div className="flex items-center justify-between gap-2">
-            <span className="font-mono text-xs font-bold text-[#d2a8ff]">
+            <span className="font-mono text-xs font-bold text-signal-memory">
               {rule.ruleKey}
             </span>
-            <span className="shrink-0 font-mono text-[10px] text-[#8b949e]">
+            <span className="shrink-0 font-mono text-[11px] text-ink-muted">
               {rule.confirmationSessions}x verified
             </span>
           </div>
-          <p className="mt-1.5 text-xs leading-relaxed text-[#c9d1d9]">
+          <p className="mt-1.5 text-xs leading-relaxed text-ink">
             {rule.ruleStatement}
           </p>
           <div className="mt-2 flex flex-wrap items-center gap-1.5">
             <span
               className={cn(
-                'rounded border px-1.5 py-0.5 text-[10px] font-medium',
+                'rounded border px-1.5 py-0.5 text-[11px] font-medium',
                 DNA_CATEGORY_STYLE[rule.category],
               )}
             >
               {rule.category}
             </span>
             {rule.enforcedInCi ? (
-              <span className="rounded border border-[#3fb950]/40 bg-[#3fb950]/10 px-1.5 py-0.5 text-[10px] text-[#3fb950]">
+              <span className="rounded border border-signal-live/40 bg-signal-live/10 px-1.5 py-0.5 text-[11px] text-signal-live">
                 CI enforced
               </span>
             ) : null}
           </div>
           {rule.layerDenyRule ? (
-            <div className="mt-2 flex items-center gap-1 text-[10px] text-[#f85149]">
+            <div className="mt-2 flex items-center gap-1 text-[11px] text-signal-danger">
               <ShieldAlert className="h-3 w-3" />
               Gate: {rule.layerDenyRule}
             </div>
@@ -159,11 +160,11 @@ function TierBadge({ tier, label, state }: { tier: number; label: string; state:
   return (
     <span
       className={cn(
-        'inline-flex items-center gap-1 rounded border px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wider',
-        state === 'done' && 'border-[#3fb950]/40 bg-[#3fb950]/10 text-[#3fb950]',
-        state === 'active' && 'border-[#58a6ff]/60 bg-[#58a6ff]/15 text-[#79c0ff]',
-        state === 'loading' && 'border-[#58a6ff]/60 bg-[#58a6ff]/10 text-[#79c0ff]',
-        state === 'pending' && 'border-[#30363d] bg-[#161b22] text-[#8b949e]',
+        'inline-flex items-center gap-1 rounded border px-1.5 py-0.5 font-mono text-[11px] uppercase tracking-wider',
+        state === 'done' && 'border-signal-live/40 bg-signal-live/10 text-signal-live',
+        state === 'active' && 'border-signal-info/60 bg-signal-info/15 text-signal-info',
+        state === 'loading' && 'border-signal-info/60 bg-signal-info/10 text-signal-info',
+        state === 'pending' && 'border-wire bg-vault-1 text-ink-muted',
       )}
     >
       {state === 'loading' ? (
@@ -186,27 +187,27 @@ function HitCard({
       type="button"
       onClick={onClick}
       className={cn(
-        'block w-full rounded-md border bg-[#161b22] px-3 py-2 text-left transition-colors hover:bg-[#1c2128]',
+        'block w-full rounded-md border bg-vault-1 px-3 py-2 text-left transition-colors hover:bg-vault-hover',
         hit.isStale
-          ? 'border-[#d29922]/60 hover:border-[#d29922]'
-          : 'border-[#30363d] hover:border-[#58a6ff]/50',
+          ? 'border-signal-gate/60 hover:border-signal-gate'
+          : 'border-wire hover:border-signal-info/50',
       )}
     >
       <div className="flex items-baseline justify-between gap-2">
-        <span className="truncate text-xs font-medium text-[#79c0ff]">
+        <span className="truncate text-xs font-medium text-signal-info">
           {hit.title}
         </span>
-        <span className="shrink-0 font-mono text-[10px] text-[#8b949e]">
+        <span className="shrink-0 font-mono text-[11px] text-ink-muted">
           ~{hit.tokenEstimate} tok
         </span>
       </div>
-      <p className="mt-0.5 truncate text-[11px] text-[#8b949e]">{hit.subtitle}</p>
+      <p className="mt-0.5 truncate text-[11px] text-ink-muted">{hit.subtitle}</p>
       <div className="mt-1 flex items-center justify-between gap-2">
-        <span className="font-mono text-[9px] text-[#3fb950]">
+        <span className="font-mono text-[11px] text-signal-live">
           Scope: {hit.scope} • Category: {hit.category}
         </span>
         {hit.isStale ? (
-          <span className="inline-flex items-center gap-0.5 font-mono text-[9px] text-[#d29922]">
+          <span className="inline-flex items-center gap-0.5 font-mono text-[11px] text-signal-gate">
             <FileWarning className="h-2.5 w-2.5" /> stale
           </span>
         ) : null}
@@ -226,34 +227,34 @@ function TimelineNode({
     <div className="relative">
       <span
         className={cn(
-          'absolute -left-[13px] top-1.5 h-2 w-2 rounded-full ring-2 ring-[#161b22]',
-          anchor ? 'bg-[#58a6ff]' : 'bg-[#30363d]',
+          'absolute -left-[13px] top-1.5 h-2 w-2 rounded-full ring-2 ring-vault-1',
+          anchor ? 'bg-signal-info' : 'bg-wire',
         )}
       />
       <div
         className={cn(
           'rounded-md border px-2.5 py-1.5',
           anchor
-            ? 'border-[#58a6ff]/60 bg-[#58a6ff]/10'
-            : 'border-[#30363d] bg-[#161b22]',
+            ? 'border-signal-info/60 bg-signal-info/10'
+            : 'border-wire bg-vault-1',
         )}
       >
         <div className="flex items-center justify-between gap-2">
           <span
             className={cn(
               'truncate text-[11px] font-medium',
-              anchor ? 'text-[#79c0ff]' : 'text-[#c9d1d9]',
+              anchor ? 'text-signal-info' : 'text-ink',
             )}
           >
             {hit.title}
           </span>
           {anchor ? (
-            <span className="shrink-0 rounded border border-[#58a6ff]/50 px-1 font-mono text-[8px] uppercase text-[#79c0ff]">
+            <span className="shrink-0 rounded border border-signal-info/50 px-1 font-mono text-[11px] uppercase text-signal-info">
               anchor
             </span>
           ) : null}
         </div>
-        <p className="truncate text-[10px] text-[#8b949e]">{hit.subtitle}</p>
+        <p className="truncate text-[11px] text-ink-muted">{hit.subtitle}</p>
       </div>
     </div>
   )
@@ -317,22 +318,31 @@ function MemoryTab({
       {/* progressive disclosure stepper */}
       <div className="flex flex-wrap items-center gap-1">
         <TierBadge tier={0} label="Index" state="done" />
-        <span className="text-[10px] text-[#30363d]">→</span>
+        <span className="text-[11px] text-wire">→</span>
         <TierBadge tier={1} label="Timeline" state={tier1State} />
-        <span className="text-[10px] text-[#30363d]">→</span>
+        <span className="text-[11px] text-wire">→</span>
         <TierBadge tier={2} label="Full" state={tier2State} />
       </div>
 
       <div className="relative">
-        <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[#8b949e]" />
+        <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-ink-muted" aria-hidden />
         <input
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           placeholder="Search memory index (BM25)…"
-          className={cn(INPUT_DARK, 'h-9 w-full rounded-md border pl-8 pr-8 outline-none focus:ring-2')}
+          aria-label="Search the Tier-0 memory index"
+          name="apexpad-memory-search"
+          type="search"
+          autoComplete="off"
+          spellCheck={false}
+          aria-busy={searching}
+          className={cn(INPUT_DARK, 'h-9 w-full rounded-md border pl-8 pr-8')}
         />
         {searching ? (
-          <Loader2 className="absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 animate-spin text-[#58a6ff]" />
+          <Loader2
+            className="absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 animate-spin text-signal-info"
+            aria-hidden
+          />
         ) : null}
       </div>
 
@@ -349,7 +359,7 @@ function MemoryTab({
 
           <div>
             <TinyLabel className="mb-2">Memory Timeline — Tier 1</TinyLabel>
-            <div className="relative ml-2 border-l border-[#30363d] pl-4">
+            <div className="relative ml-2 border-l border-wire pl-4">
               <div className="space-y-2">
                 {drill.timeline.precedingObservations.map((h) => (
                   <TimelineNode key={h.id} hit={h} anchor={false} />
@@ -364,7 +374,7 @@ function MemoryTab({
 
           <div>
             <TinyLabel className="mb-1">Session Prompt Context</TinyLabel>
-            <blockquote className="rounded-md border-l-2 border-[#30363d] bg-[#0d1117] px-3 py-2 text-[11px] italic leading-relaxed text-[#8b949e]">
+            <blockquote className="rounded-md border-l-2 border-wire bg-vault px-3 py-2 text-[11px] italic leading-relaxed text-ink-muted">
               {drill.timeline.sessionPromptContext || '—'}
             </blockquote>
           </div>
@@ -382,7 +392,7 @@ function MemoryTab({
             {fullRecordLoading ? (
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
             ) : (
-              <ListTree className="h-3.5 w-3.5 text-[#d2a8ff]" />
+              <ListTree className="h-3.5 w-3.5 text-signal-memory" />
             )}
             Load Full Record (Tier 2)
           </button>
@@ -390,7 +400,7 @@ function MemoryTab({
       ) : (
         <div className="space-y-1.5">
           {hits.length === 0 ? (
-            <div className="rounded-md border border-dashed border-[#30363d] p-4 text-center text-xs text-[#8b949e]">
+            <div className="rounded-md border border-dashed border-wire p-4 text-center text-xs text-ink-muted">
               {query.trim()
                 ? 'No memory hits for this query.'
                 : 'Memory index is empty. Observations appear as you work.'}
@@ -450,32 +460,38 @@ export function LeftPane({
   ]
 
   return (
-    <section className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-[#30363d] bg-[#161b22] lg:h-full">
-      {/* tab strip */}
-      <div className="flex shrink-0 border-b border-[#30363d] bg-[#0d1117]">
-        {tabs.map((t) => (
-          <button
-            key={t.id}
-            type="button"
-            onClick={() => onTabChange(t.id)}
-            className={cn(
-              'min-h-[44px] flex-1 border-b-2 px-2 py-2 text-[11px] font-medium transition-colors lg:min-h-0',
-              tab === t.id
-                ? 'border-[#58a6ff] bg-[#161b22] text-[#e6edf3]'
-                : 'border-transparent text-[#8b949e] hover:bg-[#161b22]/60 hover:text-[#c9d1d9]',
-            )}
-          >
-            {t.label}
-            {t.count !== undefined ? (
-              <span className="ml-1 font-mono text-[9px] text-[#8b949e]">
-                ({t.count})
-              </span>
-            ) : null}
-          </button>
-        ))}
+    <section className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-wire bg-vault-1 lg:h-full">
+      {/* tab strip — the one TabStrip primitive (a11y: tablist/roving/arrows) */}
+      <div className="shrink-0 border-b border-wire bg-vault px-1 pt-1">
+        <TabStrip
+          idPrefix="left-pane"
+          ariaLabel="Left pane sections"
+          items={tabs.map((t) => ({
+            id: t.id,
+            label: (
+              <>
+                {t.label}
+                {t.count !== undefined ? (
+                  <span className="ml-1 font-mono text-[11px] text-ink-muted tabular-nums">
+                    ({t.count})
+                  </span>
+                ) : null}
+              </>
+            ),
+          }))}
+          active={tab}
+          onChange={(id) => onTabChange(id as LeftPaneTab)}
+          className="w-full [&>button]:flex-1"
+        />
       </div>
 
       <div className={cn('min-h-0 flex-1 overflow-y-auto p-3', THIN_SCROLL)}>
+        <div
+          role="tabpanel"
+          id={`left-pane-panel-${tab}`}
+          aria-labelledby={`left-pane-tab-${tab}`}
+          className="h-full"
+        >
         {tab === 'outline' ? (
           <FadeIn key="outline">
             <OutlineTab
@@ -505,6 +521,7 @@ export function LeftPane({
             />
           </FadeIn>
         ) : null}
+        </div>
       </div>
     </section>
   )

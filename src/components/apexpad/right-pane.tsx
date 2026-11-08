@@ -59,35 +59,49 @@ import {
   FadeIn,
   Panel,
   SlideInItem,
+  TabStrip,
   THIN_SCROLL,
   TinyLabel,
 } from './ui-kit'
 import { FrozenPrefixDialog } from './dialogs'
 
+/** Locale-correct stamps via Intl (never hardcoded formats). */
+const dateTimeFmt = new Intl.DateTimeFormat(undefined, {
+  dateStyle: 'medium',
+  timeStyle: 'medium',
+})
+const timeFmt = new Intl.DateTimeFormat(undefined, { timeStyle: 'medium' })
+
 /* ------------------------------ event feed ------------------------------- */
 
 const EVENT_ICON: Record<CaptureEventType, { icon: React.ReactNode; color: string }> = {
-  'hook:session_start': { icon: <Play className="h-3 w-3" />, color: 'text-[#3fb950]' },
-  'hook:user_prompt': { icon: <MessageSquare className="h-3 w-3" />, color: 'text-[#58a6ff]' },
-  'hook:post_tool_use': { icon: <Wrench className="h-3 w-3" />, color: 'text-[#d29922]' },
-  'hook:session_end': { icon: <Square className="h-3 w-3" />, color: 'text-[#f85149]' },
-  'fs:file_indexed': { icon: <FileCode className="h-3 w-3" />, color: 'text-[#79c0ff]' },
-  'fs:file_rekeyed': { icon: <RefreshCw className="h-3 w-3" />, color: 'text-[#d2a8ff]' },
-  'spec:structured': { icon: <ScrollText className="h-3 w-3" />, color: 'text-[#79c0ff]' },
-  'agent:turn_complete': { icon: <Bot className="h-3 w-3" />, color: 'text-[#7ee787]' },
-  'dag:staged': { icon: <GitBranch className="h-3 w-3" />, color: 'text-[#d2a8ff]' },
-  'artifact:resolved': { icon: <CheckCircle2 className="h-3 w-3" />, color: 'text-[#3fb950]' },
-  'artifact:committed': { icon: <HardDrive className="h-3 w-3" />, color: 'text-[#7ee787]' },
-  'artifact:rolled_back': { icon: <Undo2 className="h-3 w-3" />, color: 'text-[#d29922]' },
-  'quarantine:blocked': { icon: <Ban className="h-3 w-3" />, color: 'text-[#f85149]' },
-  'guardrail:report': { icon: <TriangleAlert className="h-3 w-3" />, color: 'text-[#d29922]' },
-  'verify:report': { icon: <ShieldCheck className="h-3 w-3" />, color: 'text-[#79c0ff]' },
-  'pipeline:complete': { icon: <CheckCircle2 className="h-3 w-3" />, color: 'text-[#7ee787]' },
-  'browser:command': { icon: <Wrench className="h-3 w-3" />, color: 'text-[#d2a8ff]' },
-  'e2e:suite': { icon: <ShieldCheck className="h-3 w-3" />, color: 'text-[#3fb950]' },
+  'hook:session_start': { icon: <Play className="h-3 w-3" />, color: 'text-signal-live' },
+  'hook:user_prompt': { icon: <MessageSquare className="h-3 w-3" />, color: 'text-signal-info' },
+  'hook:post_tool_use': { icon: <Wrench className="h-3 w-3" />, color: 'text-signal-gate' },
+  'hook:session_end': { icon: <Square className="h-3 w-3" />, color: 'text-signal-danger' },
+  'fs:file_indexed': { icon: <FileCode className="h-3 w-3" />, color: 'text-signal-info' },
+  'fs:file_rekeyed': { icon: <RefreshCw className="h-3 w-3" />, color: 'text-signal-memory' },
+  'spec:structured': { icon: <ScrollText className="h-3 w-3" />, color: 'text-signal-info' },
+  'agent:turn_complete': { icon: <Bot className="h-3 w-3" />, color: 'text-signal-live' },
+  'dag:staged': { icon: <GitBranch className="h-3 w-3" />, color: 'text-signal-memory' },
+  'artifact:resolved': { icon: <CheckCircle2 className="h-3 w-3" />, color: 'text-signal-live' },
+  'artifact:committed': { icon: <HardDrive className="h-3 w-3" />, color: 'text-signal-live' },
+  'artifact:rolled_back': { icon: <Undo2 className="h-3 w-3" />, color: 'text-signal-gate' },
+  'quarantine:blocked': { icon: <Ban className="h-3 w-3" />, color: 'text-signal-danger' },
+  'guardrail:report': { icon: <TriangleAlert className="h-3 w-3" />, color: 'text-signal-gate' },
+  'verify:report': { icon: <ShieldCheck className="h-3 w-3" />, color: 'text-signal-info' },
+  'pipeline:complete': { icon: <CheckCircle2 className="h-3 w-3" />, color: 'text-signal-live' },
+  'browser:command': { icon: <Wrench className="h-3 w-3" />, color: 'text-signal-memory' },
+  'e2e:suite': { icon: <ShieldCheck className="h-3 w-3" />, color: 'text-signal-live' },
 }
 
-function EventFeed({ events }: { events: UnattendedCaptureEvent[] }) {
+function EventFeed({
+  events,
+  sseConnected,
+}: {
+  events: UnattendedCaptureEvent[]
+  sseConnected: boolean
+}) {
   const [, setTick] = React.useState(0)
 
   // Re-render periodically so relative timestamps stay fresh.
@@ -100,42 +114,59 @@ function EventFeed({ events }: { events: UnattendedCaptureEvent[] }) {
     <div>
       <TinyLabel className="mb-1.5">Live Event Feed (SSE)</TinyLabel>
       <div
+        role="log"
+        aria-live="polite"
+        aria-label="Live capture event feed"
         className={cn(
-          'max-h-64 space-y-1 overflow-y-auto rounded-md border border-[#30363d] bg-[#0d1117] p-1.5',
+          'max-h-64 space-y-1 overflow-y-auto rounded-md border border-wire bg-vault p-1.5',
           THIN_SCROLL,
         )}
       >
         {events.length === 0 ? (
-          <div className="p-3 text-center text-[11px] text-[#8b949e]">
-            Listening for capture events…
+          <div className="p-3 text-center text-[11px] text-ink-muted" role="status">
+            {sseConnected
+              ? 'Connected — no capture events yet. Run an agent turn or a hook to generate some.'
+              : 'Event stream disconnected — events will appear here once the SSE channel reconnects.'}
           </div>
         ) : (
           <AnimatePresence initial={false}>
             {events.map((event, i) => {
               const meta = EVENT_ICON[event.eventType] ?? {
                 icon: <Wrench className="h-3 w-3" />,
-                color: 'text-[#8b949e]',
+                color: 'text-ink-muted',
               }
+              const payloadJson = JSON.stringify(event.payload ?? {})
               return (
                 <SlideInItem
                   key={`${event.timestamp}-${event.eventType}-${i}`}
-                  className="flex items-start gap-2 rounded px-1.5 py-1 hover:bg-[#161b22]"
+                  className="flex items-start gap-2 rounded px-1.5 py-1 hover:bg-vault-1"
                 >
-                  <span className={cn('mt-0.5 shrink-0', meta.color)}>
+                  <span className={cn('mt-0.5 shrink-0', meta.color)} aria-hidden>
                     {meta.icon}
                   </span>
                   <div className="min-w-0 flex-1">
                     <div className="flex items-baseline justify-between gap-2">
-                      <span className={cn('font-mono text-[10px] font-semibold', meta.color)}>
+                      <span className={cn('font-mono text-[11px] font-semibold', meta.color)}>
                         {event.eventType}
                       </span>
-                      <span className="shrink-0 font-mono text-[9px] text-[#8b949e]">
+                      <time
+                        dateTime={event.timestamp}
+                        className="shrink-0 font-mono text-[11px] text-ink-muted tabular-nums"
+                      >
                         {formatRelativeTime(event.timestamp)}
-                      </span>
+                      </time>
                     </div>
-                    <p className="break-all font-mono text-[9px] leading-relaxed text-[#8b949e]">
-                      {truncate(JSON.stringify(event.payload ?? {}), 120)}
-                    </p>
+                    {/* Fold, never truncate: full payload on demand (DESIGN.md §6) */}
+                    <details className="group mt-0.5">
+                      <summary className="cursor-pointer select-none break-all font-mono text-[11px] leading-relaxed text-ink-muted transition-colors hover:text-ink">
+                        {truncate(payloadJson, 80)}
+                        <span className="ml-1 text-signal-info group-open:hidden">[expand]</span>
+                        <span className="ml-1 hidden text-ink-ghost group-open:inline">[collapse]</span>
+                      </summary>
+                      <pre className="mt-1 break-all whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-ink">
+                        {payloadJson}
+                      </pre>
+                    </details>
                   </div>
                 </SlideInItem>
               )
@@ -167,7 +198,7 @@ function DagNode({
       <Panel
         className={cn(
           'p-3 transition-colors',
-          highlight && 'border-[#d29922]/70 bg-[#d29922]/5 shadow-[0_0_16px_rgba(210,153,34,0.08)]',
+          highlight && 'border-signal-gate/70 bg-signal-gate/5',
         )}
       >
         <div className="flex items-center gap-1.5">
@@ -178,7 +209,7 @@ function DagNode({
         </div>
         <div className="mt-2">{children}</div>
       </Panel>
-      <div className="mx-auto h-2.5 w-px bg-[#30363d]" aria-hidden />
+      <div className="mx-auto h-2.5 w-px bg-wire" aria-hidden />
     </>
   )
 }
@@ -190,6 +221,7 @@ function DagTab({
   events,
   diskCommits,
   quarantinedEdits,
+  sseConnected,
   onReInflateCcr,
 }: {
   envelope: PackedContextEnvelope | null
@@ -198,6 +230,7 @@ function DagTab({
   events: UnattendedCaptureEvent[]
   diskCommits: DiskCommitRecord[]
   quarantinedEdits: QuarantinedEditSummary[]
+  sseConnected: boolean
   onReInflateCcr: (ccrId: string) => void
 }) {
   const stagedCount = stagedArtifacts.filter((a) => a.status === 'staged').length
@@ -208,30 +241,30 @@ function DagTab({
 
       <DagNode
         title="1. Project DNA + MEM0 Router"
-        titleColor="text-[#7ee787]"
+        titleColor="text-signal-live"
         icon={<Route className="h-3.5 w-3.5" />}
       >
         <div className="flex flex-wrap items-center gap-1.5">
-          <span className="text-[10px] text-[#8b949e]">Frozen Prefix Hash:</span>
-          <code className="rounded border border-[#30363d] bg-[#0d1117] px-1.5 py-0.5 font-mono text-[10px] text-[#7ee787]">
+          <span className="text-[11px] text-ink-muted">Frozen Prefix Hash:</span>
+          <code className="rounded border border-wire bg-vault px-1.5 py-0.5 font-mono text-[11px] text-signal-live">
             {envelope ? envelope.frozenPrefixHash.slice(0, 12) : '—'}
           </code>
-          <span className="font-mono text-[9px] text-[#8b949e]">(KV-Cache Aligned)</span>
+          <span className="font-mono text-[11px] text-ink-muted">(KV-Cache Aligned)</span>
         </div>
       </DagNode>
 
       <DagNode
         title="2. Context Pack (U-Curve + CCR)"
-        titleColor="text-[#79c0ff]"
+        titleColor="text-signal-info"
         icon={<PackageCheck className="h-3.5 w-3.5" />}
       >
-        <div className="font-mono text-[10px] text-[#8b949e]">
+        <div className="font-mono text-[11px] text-ink-muted">
           Tokens:{' '}
-          <span className="text-[#e6edf3]">
+          <span className="text-ink-strong">
             {envelope?.estimatedTotalTokens ?? '—'} / {envelope?.tokenBudgetCeiling ?? '—'}
           </span>{' '}
           • Byte Ceiling:{' '}
-          <span className="text-[#e6edf3]">{envelope?.byteCeiling ?? '—'} B</span>
+          <span className="text-ink-strong">{envelope?.byteCeiling ?? '—'} B</span>
         </div>
         <div className="mt-2 flex flex-wrap gap-1.5">
           {(envelope?.includedCcrIds ?? []).map((ccrId) => (
@@ -239,35 +272,36 @@ function DagTab({
               key={ccrId}
               type="button"
               onClick={() => onReInflateCcr(ccrId)}
-              className="rounded border border-[#79c0ff]/40 bg-[#79c0ff]/10 px-1.5 py-0.5 font-mono text-[10px] text-[#79c0ff] hover:bg-[#79c0ff]/20"
+              aria-label={`Re-inflate CCR block ${ccrId} — rebuild from source observations`}
+              className="inline-flex min-h-[28px] items-center rounded border border-signal-info/40 bg-signal-info/10 px-1.5 font-mono text-[11px] text-signal-info hover:bg-signal-info/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-wire-focus"
             >
               Re-inflate {ccrId}
             </button>
           ))}
           {(envelope?.includedCcrIds ?? []).length === 0 ? (
-            <span className="text-[10px] text-[#8b949e]">no CCR stubs in pack</span>
+            <span className="text-[11px] text-ink-muted">no CCR stubs in pack</span>
           ) : null}
         </div>
       </DagNode>
 
       <DagNode
         title="3. Planner (CrewAI) → DAG Engine (LangGraph)"
-        titleColor="text-[#d2a8ff]"
+        titleColor="text-signal-memory"
         icon={<Network className="h-3.5 w-3.5" />}
         highlight={dagState?.status === 'running'}
       >
-        <div className="font-mono text-[10px] text-[#8b949e]">
+        <div className="font-mono text-[11px] text-ink-muted">
           Research Agent (
-          <span className="text-[#e6edf3]">{envelope?.includedObservationIds.length ?? 0}</span>{' '}
+          <span className="text-ink-strong">{envelope?.includedObservationIds.length ?? 0}</span>{' '}
           obs) ⇄ Architect Agent (
-          <span className="text-[#e6edf3]">{envelope?.includedSymbolIds.length ?? 0}</span> AST
+          <span className="text-ink-strong">{envelope?.includedSymbolIds.length ?? 0}</span> AST
           nodes)
         </div>
         {dagState ? (
           <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
             <Chip className="font-mono">run: {dagState.runId.slice(0, 10)}</Chip>
-            <Chip className="text-[#c9d1d9]">{dagState.currentNode}</Chip>
-            <Chip title={dagState.userGoal} className="max-w-full text-[#d2a8ff]">
+            <Chip className="text-ink">{dagState.currentNode}</Chip>
+            <Chip title={dagState.userGoal} className="max-w-full text-signal-memory">
               goal: {truncate(dagState.userGoal, 40)}
             </Chip>
           </div>
@@ -276,7 +310,7 @@ function DagTab({
 
       <DagNode
         title="4. Artifact Staging → Human Approval"
-        titleColor="text-[#e6edf3]"
+        titleColor="text-ink-strong"
         icon={<ShieldCheck className="h-3.5 w-3.5" />}
         highlight={stagedCount > 0 || dagState?.status === 'awaiting_human_approval'}
       >
@@ -287,57 +321,58 @@ function DagTab({
           </Chip>
           <span
             className={cn(
-              'rounded border px-1.5 py-0.5 font-mono text-[9px] uppercase',
+              'rounded border px-1.5 py-0.5 font-mono text-[11px] uppercase',
               stagedCount > 0
-                ? 'border-[#d29922]/50 bg-[#d29922]/15 text-[#d29922]'
-                : 'border-[#3fb950]/40 bg-[#3fb950]/10 text-[#3fb950]',
+                ? 'border-signal-gate/50 bg-signal-gate/15 text-signal-gate'
+                : 'border-signal-live/40 bg-signal-live/10 text-signal-live',
             )}
           >
             {stagedCount > 0 ? 'awaiting human approval' : 'gate clear'}
           </span>
         </div>
-        <div className="mt-1.5 flex flex-wrap items-center gap-1.5 font-mono text-[9px] text-[#8b949e]">
-          <span className="inline-flex items-center gap-1 text-[#7ee787]">
-            <HardDrive className="h-2.5 w-2.5" />
+        <div className="mt-1.5 flex flex-wrap items-center gap-1.5 font-mono text-[11px] text-ink-muted tabular-nums">
+          <span className="inline-flex items-center gap-1 text-signal-live">
+            <HardDrive className="h-2.5 w-2.5" aria-hidden />
             {diskCommits.filter((c) => !c.rolledBack).length} on-disk commit(s)
           </span>
-          <span className="inline-flex items-center gap-1 text-[#d29922]">
-            <Undo2 className="h-2.5 w-2.5" />
+          <span className="inline-flex items-center gap-1 text-signal-gate">
+            <Undo2 className="h-2.5 w-2.5" aria-hidden />
             {diskCommits.filter((c) => c.rolledBack).length} rolled back
           </span>
         </div>
       </DagNode>
 
       {quarantinedEdits.length > 0 ? (
-        <Panel className="border-[#f85149]/60 bg-[#f85149]/5 p-3">
+        <Panel className="border-signal-danger/60 bg-signal-danger/5 p-3">
           <div className="flex items-center gap-1.5">
-            <Ban className="h-3.5 w-3.5 text-[#f85149]" />
-            <span className="text-[11px] font-bold uppercase tracking-wide text-[#f85149]">
+            <Ban className="h-3.5 w-3.5 text-signal-danger" />
+            <span className="text-[11px] font-bold uppercase tracking-wide text-signal-danger">
               Hard Quarantine Gate — {quarantinedEdits.length} edit(s) blocked
             </span>
           </div>
           <div className="mt-2 space-y-2">
             {quarantinedEdits.slice(0, 5).map((q) => (
-              <div key={q.quarantineId} className="rounded-md border border-[#f85149]/40 bg-[#0d1117] p-2">
+              <div key={q.quarantineId} className="rounded-md border border-signal-danger/40 bg-vault p-2">
                 <div className="flex items-center justify-between gap-2">
-                  <span className="break-all font-mono text-[10px] font-bold text-[#f85149]">
+                  <span className="break-all font-mono text-[11px] font-bold text-signal-danger">
                     {q.targetFilePath}
                   </span>
-                  <span className="shrink-0 font-mono text-[9px] text-[#8b949e]">
+                  <span className="shrink-0 font-mono text-[11px] text-ink-muted">
                     {formatRelativeTime(q.quarantinedAt)}
                   </span>
                 </div>
                 <ul className="mt-1 space-y-0.5">
                   {q.blockingReasons.map((reason, i) => (
-                    <li key={i} className="font-mono text-[9px] leading-relaxed text-[#f85149]/90">
-                      ⚠ {reason}
+                    <li key={i} className="flex items-start gap-1 font-mono text-[11px] leading-relaxed text-signal-danger/90">
+                      <TriangleAlert className="mt-0.5 h-3 w-3 shrink-0" aria-hidden />
+                      <span>{reason}</span>
                     </li>
                   ))}
                 </ul>
               </div>
             ))}
             {quarantinedEdits.length > 5 ? (
-              <p className="font-mono text-[9px] text-[#8b949e]">
+              <p className="font-mono text-[11px] text-ink-muted">
                 +{quarantinedEdits.length - 5} more quarantined edit(s) — never staged.
               </p>
             ) : null}
@@ -345,12 +380,44 @@ function DagTab({
         </Panel>
       ) : null}
 
-      <EventFeed events={events} />
+      <EventFeed events={events} sseConnected={sseConnected} />
     </div>
   )
 }
 
 /* ------------------------------ context pack ------------------------------ */
+
+/** Readable (13px) payload viewer — collapsed by default, expands on demand. */
+function PackPayload({ xml }: { xml: string }) {
+  const [expanded, setExpanded] = React.useState(false)
+  return (
+    <div>
+      <pre
+        className={cn(
+          'overflow-auto whitespace-pre-wrap rounded-md border border-wire bg-vault p-3 font-mono text-[13px] leading-relaxed text-signal-info transition-[max-height] duration-200',
+          expanded ? 'max-h-[560px]' : 'max-h-56',
+          THIN_SCROLL,
+        )}
+        aria-expanded={expanded}
+      >
+        {xml || 'Context pack will stream here once the workbench initializes.'}
+      </pre>
+      {xml ? (
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          aria-expanded={expanded}
+          className={cn(
+            'mt-1.5 inline-flex min-h-[44px] w-full items-center justify-center gap-1.5 rounded-md px-3 py-2 text-xs font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-wire-focus lg:min-h-0',
+            BTN_SECONDARY,
+          )}
+        >
+          {expanded ? 'Collapse payload' : 'Show full payload'}
+        </button>
+      ) : null}
+    </div>
+  )
+}
 
 function ContextPackTab({ envelope }: { envelope: PackedContextEnvelope | null }) {
   const [prefixOpen, setPrefixOpen] = React.useState(false)
@@ -362,21 +429,15 @@ function ContextPackTab({ envelope }: { envelope: PackedContextEnvelope | null }
         <CopyButton text={envelope?.liveZoneXml ?? ''} label="Copy XML" />
       </div>
 
-      <pre
-        className={cn(
-          'max-h-[420px] overflow-auto whitespace-pre-wrap rounded-md border border-[#30363d] bg-[#0d1117] p-3 font-mono text-[10px] leading-relaxed text-[#a5d6ff]',
-          THIN_SCROLL,
-        )}
-      >
-        {envelope?.liveZoneXml || 'Context pack will stream here once the workbench initializes.'}
-      </pre>
+      {/* 13px readable payload with progressive disclosure — fold, never shrink */}
+      <PackPayload xml={envelope?.liveZoneXml ?? ''} />
 
       {envelope && envelope.truncationDisclosures.length > 0 ? (
         <div className="space-y-1.5">
           {envelope.truncationDisclosures.map((disclosure, i) => (
             <div
               key={i}
-              className="flex items-start gap-1.5 rounded-md border border-[#d29922]/40 bg-[#d29922]/10 px-2 py-1.5 text-[10px] text-[#d29922]"
+              className="flex items-start gap-1.5 rounded-md border border-signal-gate/40 bg-signal-gate/10 px-2 py-1.5 text-[11px] text-signal-gate"
             >
               <TriangleAlert className="mt-0.5 h-3 w-3 shrink-0" />
               <span>{disclosure}</span>
@@ -410,68 +471,68 @@ function ContextPackTab({ envelope }: { envelope: PackedContextEnvelope | null }
 /* --------------------------- spec contract (Task 2) --------------------------- */
 
 const AGENT_ROLE_STYLE: Record<AtomicSubtaskNode['assignedAgent'], string> = {
-  researcher: 'border-[#3fb950]/50 bg-[#3fb950]/15 text-[#3fb950]',
-  architect: 'border-[#d2a8ff]/50 bg-[#d2a8ff]/15 text-[#d2a8ff]',
-  verifier: 'border-[#d29922]/50 bg-[#d29922]/15 text-[#d29922]',
+  researcher: 'border-signal-live/50 bg-signal-live/15 text-signal-live',
+  architect: 'border-signal-memory/50 bg-signal-memory/15 text-signal-memory',
+  verifier: 'border-signal-gate/50 bg-signal-gate/15 text-signal-gate',
 }
 
 const COMPLEXITY_STYLE: Record<StructuredSpecContract['estimatedReasoningComplexity'], string> = {
-  low: 'border-[#3fb950]/50 bg-[#3fb950]/15 text-[#3fb950]',
-  medium: 'border-[#d29922]/50 bg-[#d29922]/15 text-[#d29922]',
-  high: 'border-[#f85149]/50 bg-[#f85149]/15 text-[#f85149]',
+  low: 'border-signal-live/50 bg-signal-live/15 text-signal-live',
+  medium: 'border-signal-gate/50 bg-signal-gate/15 text-signal-gate',
+  high: 'border-signal-danger/50 bg-signal-danger/15 text-signal-danger',
 }
 
 function SubtaskNodeCard({ subtask }: { subtask: AtomicSubtaskNode }) {
   return (
-    <div className="rounded-md border border-[#30363d] bg-[#0d1117] p-2.5">
+    <div className="rounded-md border border-wire bg-vault p-2.5">
       <div className="flex flex-wrap items-center justify-between gap-1.5">
         <div className="flex items-center gap-1.5">
-          <span className="font-mono text-[10px] font-bold text-[#e6edf3]">
+          <span className="font-mono text-[11px] font-bold text-ink-strong">
             #{subtask.orderIndex}
           </span>
           <span
             className={cn(
-              'rounded border px-1.5 py-0.5 font-mono text-[9px] uppercase',
+              'rounded border px-1.5 py-0.5 font-mono text-[11px] uppercase',
               AGENT_ROLE_STYLE[subtask.assignedAgent],
             )}
           >
             {subtask.assignedAgent}
           </span>
         </div>
-        <code className="rounded border border-[#30363d] bg-[#161b22] px-1.5 py-0.5 font-mono text-[9px] text-[#8b949e]">
+        <code className="rounded border border-wire bg-vault-1 px-1.5 py-0.5 font-mono text-[11px] text-ink-muted">
           {subtask.verificationCommand}
         </code>
       </div>
 
-      <p className="mt-1.5 text-[11px] leading-snug text-[#c9d1d9]">{subtask.title}</p>
+      <p className="mt-1.5 text-[11px] leading-snug text-ink">{subtask.title}</p>
 
       <div className="mt-1.5 flex flex-wrap gap-1">
         {subtask.targetFiles.map((file) => (
-          <Chip key={file} className="font-mono text-[#79c0ff]">
+          <Chip key={file} className="font-mono text-signal-info">
             <FileText className="h-2.5 w-2.5" />
             {truncate(file, 34)}
           </Chip>
         ))}
         {subtask.targetSymbols.slice(0, 4).map((symbol) => (
-          <Chip key={symbol} className="font-mono text-[#7ee787]">
+          <Chip key={symbol} className="font-mono text-signal-live">
             {symbol}
           </Chip>
         ))}
       </div>
 
       {subtask.explicitConstraints.length > 0 ? (
-        <p className="mt-1.5 font-mono text-[9px] text-[#8b949e]">
+        <p className="mt-1.5 font-mono text-[11px] text-ink-muted">
           {subtask.explicitConstraints.length} explicit constraint(s) attached
         </p>
       ) : null}
 
       {subtask.dependsOnSubtaskIds.length > 0 ? (
         <div className="mt-1.5 flex flex-wrap items-center gap-1">
-          <span className="font-mono text-[9px] text-[#8b949e]">depends on:</span>
+          <span className="font-mono text-[11px] text-ink-muted">depends on:</span>
           {subtask.dependsOnSubtaskIds.map((dep) => (
             <code
               key={dep}
-              className="rounded border border-[#30363d] bg-[#161b22] px-1 py-0.5 font-mono text-[9px] text-[#d2a8ff]"
+              className="rounded border border-wire bg-vault-1 px-1 py-0.5 font-mono text-[11px] text-signal-memory"
             >
               {dep.split('_sub_')[1] ? `sub_${dep.split('_sub_')[1]}` : dep}
             </code>
@@ -487,7 +548,7 @@ function SpecContractTab({ spec }: { spec: StructuredSpecContract | null }) {
     return (
       <div className="space-y-3">
         <TinyLabel>Task 2 — Specification Structurer</TinyLabel>
-        <div className="rounded-md border border-dashed border-[#30363d] p-4 text-center text-xs text-[#8b949e]">
+        <div className="rounded-md border border-dashed border-wire p-4 text-center text-xs text-ink-muted">
           No Specification Contract compiled yet. Run an agent turn — every raw prompt is
           first compiled into a deterministic PRD with a Subtask DAG, injected Project DNA
           constraints, and acceptance criteria.
@@ -504,19 +565,19 @@ function SpecContractTab({ spec }: { spec: StructuredSpecContract | null }) {
       </div>
 
       <div className="flex flex-wrap items-center gap-1.5">
-        <code className="rounded border border-[#30363d] bg-[#0d1117] px-1.5 py-0.5 font-mono text-[10px] text-[#79c0ff]">
+        <code className="rounded border border-wire bg-vault px-1.5 py-0.5 font-mono text-[11px] text-signal-info">
           {spec.specId}
         </code>
         <span
           className={cn(
-            'rounded border px-1.5 py-0.5 font-mono text-[9px] uppercase',
+            'rounded border px-1.5 py-0.5 font-mono text-[11px] uppercase',
             COMPLEXITY_STYLE[spec.estimatedReasoningComplexity],
           )}
         >
           complexity: {spec.estimatedReasoningComplexity}
         </span>
         {spec.isOverloadedPromptSplit ? (
-          <span className="rounded border border-[#d2a8ff]/50 bg-[#d2a8ff]/15 px-1.5 py-0.5 font-mono text-[9px] uppercase text-[#d2a8ff]">
+          <span className="rounded border border-signal-memory/50 bg-signal-memory/15 px-1.5 py-0.5 font-mono text-[11px] uppercase text-signal-memory">
             overloaded → split into {spec.subtaskDag.length - 2} atomic edits
           </span>
         ) : null}
@@ -524,28 +585,28 @@ function SpecContractTab({ spec }: { spec: StructuredSpecContract | null }) {
 
       <Panel className="p-3">
         <div className="flex items-center gap-1.5">
-          <MessageSquare className="h-3 w-3 text-[#8b949e]" />
+          <MessageSquare className="h-3 w-3 text-ink-muted" />
           <TinyLabel>Raw User Prompt</TinyLabel>
         </div>
-        <p className="mt-1.5 whitespace-pre-wrap text-[11px] leading-relaxed text-[#c9d1d9]">
+        <p className="mt-1.5 whitespace-pre-wrap text-[11px] leading-relaxed text-ink">
           {spec.rawUserPrompt}
         </p>
       </Panel>
 
       <Panel className="p-3">
         <TinyLabel>Normalized Goal (Atomic Step Chain)</TinyLabel>
-        <p className="mt-1.5 break-words font-mono text-[10px] leading-relaxed text-[#7ee787]">
+        <p className="mt-1.5 break-words font-mono text-[11px] leading-relaxed text-signal-live">
           {spec.normalizedGoal}
         </p>
       </Panel>
 
       <Panel className="p-3">
         <div className="flex items-center gap-1.5">
-          <TriangleAlert className="h-3 w-3 text-[#d29922]" />
+          <TriangleAlert className="h-3 w-3 text-signal-gate" />
           <TinyLabel>Detected Ambiguities ({spec.detectedAmbiguities.length})</TinyLabel>
         </div>
         {spec.detectedAmbiguities.length === 0 ? (
-          <p className="mt-1.5 text-[10px] text-[#3fb950]">
+          <p className="mt-1.5 text-[11px] text-signal-live">
             No ambiguities — prompt grounded cleanly to AST symbols.
           </p>
         ) : (
@@ -553,7 +614,7 @@ function SpecContractTab({ spec }: { spec: StructuredSpecContract | null }) {
             {spec.detectedAmbiguities.map((ambiguity, i) => (
               <li
                 key={i}
-                className="rounded border border-[#d29922]/40 bg-[#d29922]/10 px-2 py-1 text-[10px] leading-snug text-[#d29922]"
+                className="rounded border border-signal-gate/40 bg-signal-gate/10 px-2 py-1 text-[11px] leading-snug text-signal-gate"
               >
                 {ambiguity}
               </li>
@@ -564,7 +625,7 @@ function SpecContractTab({ spec }: { spec: StructuredSpecContract | null }) {
 
       <Panel className="p-3">
         <div className="flex items-center gap-1.5">
-          <ShieldCheck className="h-3 w-3 text-[#7ee787]" />
+          <ShieldCheck className="h-3 w-3 text-signal-live" />
           <TinyLabel>
             Injected Implicit Constraints ({spec.injectedImplicitConstraints.length})
           </TinyLabel>
@@ -574,10 +635,10 @@ function SpecContractTab({ spec }: { spec: StructuredSpecContract | null }) {
             <li
               key={i}
               className={cn(
-                'rounded border px-2 py-1 font-mono text-[9px] leading-snug',
+                'rounded border px-2 py-1 font-mono text-[11px] leading-snug',
                 constraint.startsWith('PROJECT_DNA')
-                  ? 'border-[#d2a8ff]/40 bg-[#d2a8ff]/10 text-[#d2a8ff]'
-                  : 'border-[#30363d] bg-[#0d1117] text-[#c9d1d9]',
+                  ? 'border-signal-memory/40 bg-signal-memory/10 text-signal-memory'
+                  : 'border-wire bg-vault text-ink',
               )}
             >
               {constraint}
@@ -593,14 +654,14 @@ function SpecContractTab({ spec }: { spec: StructuredSpecContract | null }) {
           </TinyLabel>
           <div
             className={cn(
-              'mt-1.5 max-h-40 space-y-1 overflow-y-auto rounded-md border border-[#30363d] bg-[#0d1117] p-2',
+              'mt-1.5 max-h-40 space-y-1 overflow-y-auto rounded-md border border-wire bg-vault p-2',
               THIN_SCROLL,
             )}
           >
             {spec.schemaAndSignatureContracts.map((contract, i) => (
               <p
                 key={i}
-                className="break-all font-mono text-[9px] leading-relaxed text-[#a5d6ff]"
+                className="break-all font-mono text-[11px] leading-relaxed text-signal-info"
               >
                 {contract}
               </p>
@@ -618,8 +679,8 @@ function SpecContractTab({ spec }: { spec: StructuredSpecContract | null }) {
             <div key={subtask.subtaskId}>
               <SubtaskNodeCard subtask={subtask} />
               {idx < spec.subtaskDag.length - 1 ? (
-                <div className="mx-auto flex h-3 w-px items-center justify-center bg-[#30363d]">
-                  <ArrowDown className="h-2.5 w-2.5 text-[#8b949e]" />
+                <div className="mx-auto flex h-3 w-px items-center justify-center bg-wire">
+                  <ArrowDown className="h-2.5 w-2.5 text-ink-muted" />
                 </div>
               ) : null}
             </div>
@@ -629,13 +690,13 @@ function SpecContractTab({ spec }: { spec: StructuredSpecContract | null }) {
 
       <Panel className="p-3">
         <div className="flex items-center gap-1.5">
-          <CheckCircle2 className="h-3 w-3 text-[#3fb950]" />
+          <CheckCircle2 className="h-3 w-3 text-signal-live" />
           <TinyLabel>Acceptance Criteria ({spec.acceptanceCriteria.length})</TinyLabel>
         </div>
         <ul className="mt-1.5 space-y-1">
           {spec.acceptanceCriteria.map((criterion, i) => (
-            <li key={i} className="flex items-start gap-1.5 text-[10px] leading-snug text-[#c9d1d9]">
-              <CheckCircle2 className="mt-0.5 h-3 w-3 shrink-0 text-[#3fb950]" />
+            <li key={i} className="flex items-start gap-1.5 text-[11px] leading-snug text-ink">
+              <CheckCircle2 className="mt-0.5 h-3 w-3 shrink-0 text-signal-live" />
               <span>{criterion}</span>
             </li>
           ))}
@@ -651,10 +712,10 @@ function ArtifactStatusBadge({ status }: { status: StagedArtifact['status'] }) {
   return (
     <span
       className={cn(
-        'rounded border px-1.5 py-0.5 font-mono text-[9px] uppercase',
-        status === 'approved' && 'border-[#3fb950]/50 bg-[#3fb950]/15 text-[#3fb950]',
-        status === 'staged' && 'border-[#d29922]/50 bg-[#d29922]/15 text-[#d29922]',
-        status === 'rejected' && 'border-[#f85149]/50 bg-[#f85149]/15 text-[#f85149]',
+        'rounded border px-1.5 py-0.5 font-mono text-[11px] uppercase',
+        status === 'approved' && 'border-signal-live/50 bg-signal-live/15 text-signal-live',
+        status === 'staged' && 'border-signal-gate/50 bg-signal-gate/15 text-signal-gate',
+        status === 'rejected' && 'border-signal-danger/50 bg-signal-danger/15 text-signal-danger',
       )}
     >
       {status}
@@ -683,9 +744,9 @@ function StagingTab({
     return (
       <div className="space-y-3">
         <TinyLabel>Artifact Staging &amp; Human Approval Gate</TinyLabel>
-        <div className="rounded-md border border-dashed border-[#30363d] p-4 text-center text-xs text-[#8b949e]">
+        <div className="rounded-md border border-dashed border-wire p-4 text-center text-xs text-ink-muted">
           No staged artifacts yet. Edit the note and run{' '}
-          <span className="font-mono text-[#79c0ff]">Stage as DAG Edit</span> to propose a
+          <span className="font-mono text-signal-info">Stage as DAG Edit</span> to propose a
           change through the LangGraph gate.
         </div>
       </div>
@@ -702,22 +763,39 @@ function StagingTab({
         const rollbackBusy = busyRollbackArtifactId === artifact.artifactId
         return (
           <FadeIn key={artifact.artifactId}>
-            <Panel className="p-3">
+            <Panel
+              className="p-3 focus-within:border-wire-strong"
+              tabIndex={0}
+              aria-label={`Artifact ${artifact.targetFilePath}, status ${artifact.status}${artifact.status === 'staged' ? '. Press A to approve and commit, R to reject.' : ''}`}
+              onKeyDown={(e) => {
+                /* Keyboard approval gate (DESIGN.md §11): A approve, R reject */
+                if (artifact.status !== 'staged' || busy) return
+                if (e.target !== e.currentTarget) return
+                const key = e.key.toLowerCase()
+                if (key === 'a') {
+                  e.preventDefault()
+                  void onResolveApproval(artifact.artifactId, true)
+                } else if (key === 'r') {
+                  e.preventDefault()
+                  void onResolveApproval(artifact.artifactId, false)
+                }
+              }}
+            >
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <span className="break-all font-mono text-xs font-bold text-[#e6edf3]">
+                <span className="break-all font-mono text-xs font-bold text-ink-strong">
                   {artifact.targetFilePath}
                 </span>
                 <ArtifactStatusBadge status={artifact.status} />
               </div>
 
-              <div className="mt-1 font-mono text-[10px] text-[#8b949e]">
+              <div className="mt-1 font-mono text-[11px] text-ink-muted">
                 Direct Callers: {artifact.blastRadius.directCallers.length} • Transitive:{' '}
                 {artifact.blastRadius.transitiveCallers.length} • CX Delta:{' '}
                 <span
                   className={
                     artifact.blastRadius.cyclomaticDelta > 0
-                      ? 'text-[#f85149]'
-                      : 'text-[#3fb950]'
+                      ? 'text-signal-danger'
+                      : 'text-signal-live'
                   }
                 >
                   {artifact.blastRadius.cyclomaticDelta >= 0 ? '+' : ''}
@@ -730,9 +808,10 @@ function StagingTab({
                   {artifact.blastRadius.architectureViolations.map((violation, i) => (
                     <div
                       key={i}
-                      className="rounded border border-[#f85149]/40 bg-[#f85149]/10 px-2 py-1 font-mono text-[10px] text-[#f85149]"
+                      className="rounded border border-signal-danger/40 bg-signal-danger/10 px-2 py-1 font-mono text-[11px] text-signal-danger"
                     >
-                      ⚠️ {violation}
+                      <TriangleAlert className="mr-1 inline h-3 w-3" aria-hidden />
+                      {violation}
                     </div>
                   ))}
                 </div>
@@ -741,7 +820,7 @@ function StagingTab({
               {artifact.blastRadius.requiredTests.length > 0 ? (
                 <div className="mt-2 flex flex-wrap gap-1">
                   {artifact.blastRadius.requiredTests.map((test) => (
-                    <Chip key={test} className="font-mono text-[#7ee787]">
+                    <Chip key={test} className="font-mono text-signal-live">
                       {test}
                     </Chip>
                   ))}
@@ -757,11 +836,11 @@ function StagingTab({
                     disabled={busy}
                     onClick={() => void onResolveApproval(artifact.artifactId, true)}
                     className={cn(
-                      'inline-flex min-h-[44px] flex-1 items-center justify-center gap-1.5 rounded-md px-3 py-2 text-xs font-semibold disabled:opacity-60 lg:min-h-0',
+                      'inline-flex min-h-[44px] flex-1 items-center justify-center gap-1.5 rounded-md px-3 py-2 text-xs font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-wire-focus disabled:opacity-60 lg:min-h-0',
                       BTN_PRIMARY,
                     )}
                   >
-                    {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5" />}
+                    {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden /> : <CheckCircle2 className="h-3.5 w-3.5" aria-hidden />}
                     Approve &amp; Commit
                   </button>
                   <button
@@ -769,11 +848,11 @@ function StagingTab({
                     disabled={busy}
                     onClick={() => void onResolveApproval(artifact.artifactId, false)}
                     className={cn(
-                      'inline-flex min-h-[44px] flex-1 items-center justify-center gap-1.5 rounded-md px-3 py-2 text-xs font-semibold disabled:opacity-60 lg:min-h-0',
+                      'inline-flex min-h-[44px] flex-1 items-center justify-center gap-1.5 rounded-md px-3 py-2 text-xs font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-wire-focus disabled:opacity-60 lg:min-h-0',
                       BTN_DANGER,
                     )}
                   >
-                    {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Square className="h-3.5 w-3.5" />}
+                    {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden /> : <Square className="h-3.5 w-3.5" aria-hidden />}
                     Reject
                   </button>
                 </div>
@@ -785,43 +864,43 @@ function StagingTab({
                   className={cn(
                     'mt-2 rounded-md border p-2',
                     commit.rolledBack
-                      ? 'border-[#d29922]/50 bg-[#d29922]/5'
-                      : 'border-[#2ea043]/50 bg-[#238636]/10',
+                      ? 'border-signal-gate/50 bg-signal-gate/5'
+                      : 'border-action-hover/50 bg-action/10',
                   )}
                 >
                   <div className="flex items-center gap-1.5">
                     {commit.rolledBack ? (
-                      <Undo2 className="h-3 w-3 text-[#d29922]" />
+                      <Undo2 className="h-3 w-3 text-signal-gate" />
                     ) : (
-                      <HardDrive className="h-3 w-3 text-[#7ee787]" />
+                      <HardDrive className="h-3 w-3 text-signal-live" />
                     )}
                     <span
                       className={cn(
-                        'font-mono text-[10px] font-bold uppercase tracking-wide',
-                        commit.rolledBack ? 'text-[#d29922]' : 'text-[#7ee787]',
+                        'font-mono text-[11px] font-bold uppercase tracking-wide',
+                        commit.rolledBack ? 'text-signal-gate' : 'text-signal-live',
                       )}
                     >
                       {commit.rolledBack ? 'rolled back' : 'committed to disk'}
                     </span>
                   </div>
-                  <div className="mt-1 space-y-0.5 font-mono text-[9px] leading-relaxed text-[#8b949e]">
+                  <div className="mt-1 space-y-0.5 font-mono text-[11px] leading-relaxed text-ink-muted">
                     <p className="break-all">
                       sha256:{' '}
-                      <span className={commit.rolledBack ? 'text-[#d29922]' : 'text-[#7ee787]'}>
+                      <span className={commit.rolledBack ? 'text-signal-gate' : 'text-signal-live'}>
                         {commit.committedSha256.slice(0, 16)}…
                       </span>
                     </p>
                     <p className="break-all">
-                      path: <span className="text-[#79c0ff]">{commit.absoluteFilePath}</span>
+                      path: <span className="text-signal-info">{commit.absoluteFilePath}</span>
                     </p>
                     <p className="break-all">
                       backup: {commit.backupFilePath ? `.apexpad-backups/${artifact.artifactId}.bak` : 'none (new file)'} •
                       existed before: {String(commit.existedBeforeCommit)}
                     </p>
-                    <p>committed: {new Date(commit.committedAt).toLocaleString()}</p>
+                    <p>committed: {dateTimeFmt.format(new Date(commit.committedAt))}</p>
                     {commit.rolledBack ? (
-                      <p className="text-[#d29922]">
-                        rolled back {commit.rolledBackAt ? new Date(commit.rolledBackAt).toLocaleString() : ''} —
+                      <p className="text-signal-gate">
+                        rolled back {commit.rolledBackAt ? dateTimeFmt.format(new Date(commit.rolledBackAt)) : ''} —
                         reason: {commit.rollbackReason ?? '—'}
                       </p>
                     ) : null}
@@ -832,22 +911,22 @@ function StagingTab({
                       disabled={rollbackBusy}
                       onClick={() => void onRollbackArtifact(artifact.artifactId)}
                       className={cn(
-                        'mt-2 inline-flex min-h-[40px] w-full items-center justify-center gap-1.5 rounded-md border border-[#d29922]/60 bg-[#d29922]/15 px-3 py-2 text-xs font-bold text-[#d29922] transition-colors hover:bg-[#d29922]/25 disabled:opacity-60 lg:min-h-0',
+                        'mt-2 inline-flex min-h-[44px] w-full items-center justify-center gap-1.5 rounded-md border border-signal-gate/60 bg-signal-gate/15 px-3 py-2 text-xs font-bold text-signal-gate transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-wire-focus hover:bg-signal-gate/25 disabled:opacity-60 lg:min-h-0',
                       )}
                     >
                       {rollbackBusy ? (
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
                       ) : (
-                        <Undo2 className="h-3.5 w-3.5" />
+                        <Undo2 className="h-3.5 w-3.5" aria-hidden />
                       )}
-                      1-Click Rollback (.bak)
+                      Rollback to backup (.bak)
                     </button>
                   ) : null}
                 </div>
               ) : null}
 
               {rollback ? (
-                <div className="mt-2 rounded-md border border-[#d29922]/50 bg-[#d29922]/10 p-2 font-mono text-[9px] leading-relaxed text-[#d29922]">
+                <div className="mt-2 rounded-md border border-signal-gate/50 bg-signal-gate/10 p-2 font-mono text-[11px] leading-relaxed text-signal-gate">
                   <p className="font-bold uppercase">rolled back on disk</p>
                   <p className="break-all">restored: {rollback.restoredFilePath}</p>
                   <p>
@@ -855,7 +934,7 @@ function StagingTab({
                     {rollback.restoredSha256?.slice(0, 12) ?? '—'}…
                   </p>
                   <p className="break-all">
-                    at {new Date(rollback.rolledBackAt).toLocaleTimeString()} — {rollback.reason}
+                    at {timeFmt.format(new Date(rollback.rolledBackAt))} — {rollback.reason}
                   </p>
                 </div>
               ) : null}
@@ -878,6 +957,7 @@ export function RightPane({
   events,
   spec,
   sessionId,
+  sseConnected,
   tab,
   onTabChange,
   onReInflateCcr,
@@ -896,6 +976,7 @@ export function RightPane({
   events: UnattendedCaptureEvent[]
   spec: StructuredSpecContract | null
   sessionId: string
+  sseConnected: boolean
   tab: RightPaneTab
   onTabChange: (tab: RightPaneTab) => void
   onReInflateCcr: (ccrId: string) => void
@@ -920,31 +1001,36 @@ export function RightPane({
   ]
 
   return (
-    <section className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-[#30363d] bg-[#161b22] lg:h-full">
-      <div className="flex shrink-0 border-b border-[#30363d] bg-[#0d1117]">
-        {tabs.map((t) => (
-          <button
-            key={t.id}
-            type="button"
-            onClick={() => onTabChange(t.id)}
-            className={cn(
-              'min-h-[44px] flex-1 border-b-2 px-2 py-2 text-[11px] font-medium transition-colors lg:min-h-0',
-              tab === t.id
-                ? 'border-[#58a6ff] bg-[#161b22] text-[#e6edf3]'
-                : 'border-transparent text-[#8b949e] hover:bg-[#161b22]/60 hover:text-[#c9d1d9]',
-            )}
-          >
-            {t.label}
-            {t.count !== undefined ? (
-              <span className="ml-1 font-mono text-[9px] text-[#8b949e]">
-                ({t.count})
-              </span>
-            ) : null}
-          </button>
-        ))}
+    <section className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-wire bg-vault-1 lg:h-full">
+      <div className="shrink-0 border-b border-wire bg-vault px-1 pt-1">
+        <TabStrip
+          idPrefix="right-pane"
+          ariaLabel="Right pane sections"
+          items={tabs.map((t) => ({
+            id: t.id,
+            label: (
+              <>
+                {t.label}
+                {t.count !== undefined ? (
+                  <span className="ml-1 font-mono text-[11px] text-ink-muted tabular-nums">
+                    ({t.count})
+                  </span>
+                ) : null}
+              </>
+            ),
+          }))}
+          active={tab}
+          onChange={(id) => onTabChange(id as RightPaneTab)}
+          className="w-full [&>button]:flex-1"
+        />
       </div>
 
       <div className={cn('min-h-0 flex-1 overflow-y-auto p-3', THIN_SCROLL)}>
+        <div
+          role="tabpanel"
+          id={`right-pane-panel-${tab}`}
+          aria-labelledby={`right-pane-tab-${tab}`}
+        >
         {tab === 'dag' ? (
           <FadeIn key="dag">
             <DagTab
@@ -954,6 +1040,7 @@ export function RightPane({
               events={events}
               diskCommits={diskCommits}
               quarantinedEdits={quarantinedEdits}
+              sseConnected={sseConnected}
               onReInflateCcr={onReInflateCcr}
             />
           </FadeIn>
@@ -992,6 +1079,7 @@ export function RightPane({
             />
           </FadeIn>
         ) : null}
+        </div>
       </div>
     </section>
   )

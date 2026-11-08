@@ -1,0 +1,1507 @@
+     1→'use client'
+     2→
+     3→/**
+     4→ * src/components/apexpad/verification-panel.tsx
+     5→ * VERIFIER panel — the Slice 3 control surface (blueprint §7.6 / §7.7):
+     6→ *   GUARD    — Task 3 Model Generation Guardrails inspector (anti-truncation
+     7→ *              AST splicer, hallucinated-import blocker, version-skew scanner,
+     8→ *              anti-sycophancy premise critic).
+     9→ *   BROWSER  — Task 4 Agent-Browser console (live DOM registry seeding,
+    10→ *              snapshot -i -> @e1 RefMap -> action loop with loud failures,
+    11→ *              CSPRNG content boundaries, domain allowlist).
+    12→ *   RUNTIME  — Task 4 artifact verification (compiler/type-check gate,
+    13→ *              Ripwire test gate, Agent-Browser loop) over staged artifacts.
+    14→ *   PIPELINE — §7.6 unified 4-stage pipeline runner (spec -> guardrails ->
+    15→ *              DAG staging -> runtime verification).
+    16→ *   SUITE    — §7.7 End-to-End Verification Suite for Tasks 2, 3 and 4 with
+    17→ *              per-assertion evidence.
+    18→ *
+    19→ * All calls flow through the /api/apexpad contract (apexpadApi client).
+    20→ */
+    21→
+    22→import * as React from 'react'
+    23→import {
+    24→  AlertTriangle,
+    25→  Check,
+    26→  ChevronRight,
+    27→  FlaskConical,
+    28→  Globe,
+    29→  Loader2,
+    30→  Play,
+    31→  Plus,
+    32→  RotateCcw,
+    33→  ShieldCheck,
+    34→  TerminalSquare,
+    35→  Trash2,
+    36→  X,
+    37→} from 'lucide-react'
+    38→
+    39→import type {
+    40→  AgentBrowserActionCommand,
+    41→  AgentBrowserActionExecutionResult,
+    42→  E2eSuiteRunReport,
+    43→  FullApexPipelineResult,
+    44→  GuardrailInspectionReport,
+    45→  RuntimeVerificationReport,
+    46→} from '@/lib/apexpad-guardrails-types'
+    47→import type { PackedContextEnvelope, StagedArtifact } from '@/lib/apexpad-types'
+    48→import { apexpadApi } from '@/lib/apexpad-client'
+    49→import { useToast } from '@/hooks/use-toast'
+    50→import { cn } from '@/lib/utils'
+    51→
+    52→import {
+    53→  BTN_PRIMARY,
+    54→  BTN_SECONDARY,
+    55→  INPUT_DARK,
+    56→  Panel,
+    57→  THIN_SCROLL,
+    58→  TinyLabel,
+    59→  TOAST_DARK,
+    60→} from './ui-kit'
+    61→
+    62→/* ------------------------------------------------------------------ */
+    63→/* §7.7 scenario fixtures (prefilled demo inputs)                      */
+    64→/* ------------------------------------------------------------------ */
+    65→
+    66→const GUARD_DEMO_FILE = 'src/security/sessionAuth.ts'
+    67→
+    68→const GUARD_DEMO_PREVIOUS = `import Database from 'better-sqlite3';
+    69→
+    70→export function verifySessionToken(token: string): boolean {
+    71→  if (!token) throw new Error("Missing token");
+    72→  return token.startsWith("valid_");
+    73→}
+    74→
+    75→export function revokeSessionToken(token: string): string {
+    76→  return "revoked:" + token;
+    77→}
+    78→
+    79→export function auditSecurityLog(entry: string): string {
+    80→  return "[AUDIT] " + entry;
+    81→}
+    82→`
+    83→
+    84→const GUARD_DEMO_PROPOSED = `import Database from 'better-sqlite3';
+    85→import { magicVerify } from '@nonexistent-hallucinated/magic-auth';
+    86→
+    87→export function verifySessionToken(token: string): boolean {
+    88→  if (!token) throw new Error("Missing token");
+    89→  return token.startsWith("valid_v2_");
+    90→}
+    91→// ... rest of existing code remains unchanged ...
+    92→`
+    93→
+    94→const GUARD_DEMO_PROMPT = 'Is it crashing because of redisClusterConfig?'
+    95→
+    96→const BROWSER_DEMO_URL = 'http://127.0.0.1:3000/checkout'
+    97→
+    98→const BROWSER_DEMO_ELEMENTS = JSON.stringify(
+    99→  [
+   100→    {
+   101→      role: 'button',
+   102→      name: 'Accept Cookies',
+   103→      tagName: 'BUTTON',
+   104→      isInteractive: true,
+   105→      domPathSelector: '#accept-cookies-btn',
+   106→    },
+   107→    {
+   108→      role: 'button',
+   109→      name: 'Submit Order',
+   110→      tagName: 'BUTTON',
+   111→      isInteractive: true,
+   112→      coveredByOverlaySelector: '#cookie-consent-banner',
+   113→      domPathSelector: '#submit-order-btn',
+   114→    },
+   115→    {
+   116→      role: 'textbox',
+   117→      name: 'Promo code',
+   118→      tagName: 'INPUT',
+   119→      isInteractive: true,
+   120→      domPathSelector: '#promo-input',
+   121→    },
+   122→  ],
+   123→  null,
+   124→  2,
+   125→)
+   126→
+   127→const SERVICE_DEMO_PREVIOUS = `import { executeRawQuery } from '../db/query';
+   128→
+   129→/**
+   130→ * Account service layer. Reads flow db -> service -> renderer, never sideways.
+   131→ */
+   132→export function fetchUserAccount(id: string): { id: string; plan: string; seats: number } {
+   133→  const { rows } = executeRawQuery(\`SELECT id, plan, seats FROM accounts WHERE id = '\${id}'\`);
+   134→  if (rows.length === 0) {
+   135→    throw new Error(\`Account \${id} not found\`);
+   136→  }
+   137→  return rows[0] as { id: string; plan: string; seats: number };
+   138→}
+   139→
+   140→export function listAllAccounts() {
+   141→  return executeRawQuery('SELECT id, plan FROM accounts ORDER BY created_at DESC').rows;
+   142→}
+   143→`
+   144→
+   145→const SERVICE_DEMO_PROPOSED = `${SERVICE_DEMO_PREVIOUS}
+   146→export function fetchAccountPlan(id: string): string {
+   147→  return fetchUserAccount(id).plan;
+   148→}
+   149→`
+   150→
+   151→const PIPELINE_DEMO_PROMPT =
+   152→  'Add a fetchAccountPlan helper to the account service and harden verifySessionToken against v2 tokens; also connect the audit trail'
+   153→
+   154→/* ------------------------------------------------------------------ */
+   155→/* Shared micro pieces                                                 */
+   156→/* ------------------------------------------------------------------ */
+   157→
+   158→function GateBadge({
+   159→  ok,
+   160→  label,
+   161→  warn,
+   162→}: {
+   163→  ok: boolean
+   164→  label: string
+   165→  warn?: boolean
+   166→}) {
+   167→  return (
+   168→    <span
+   169→      className={cn(
+   170→        'inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide',
+   171→        ok
+   172→          ? 'border-[#3fb950]/40 bg-[#3fb950]/10 text-[#3fb950]'
+   173→          : warn
+   174→            ? 'border-[#d29922]/40 bg-[#d29922]/10 text-[#d29922]'
+   175→            : 'border-[#f85149]/40 bg-[#f85149]/10 text-[#f85149]',
+   176→      )}
+   177→    >
+   178→      {ok ? <Check className="h-3 w-3" /> : <AlertTriangle className="h-3 w-3" />}
+   179→      {label}
+   180→    </span>
+   181→  )
+   182→}
+   183→
+   184→function EvidenceList({
+   185→  items,
+   186→  tone,
+   187→  emptyText,
+   188→}: {
+   189→  items: string[]
+   190→  tone: 'red' | 'yellow' | 'blue' | 'green'
+   191→  emptyText?: string
+   192→}) {
+   193→  if (items.length === 0) {
+   194→    return emptyText ? (
+   195→      <p className="text-[11px] italic text-[#8b949e]">{emptyText}</p>
+   196→    ) : null
+   197→  }
+   198→  const color =
+   199→    tone === 'red'
+   200→      ? 'text-[#f85149]'
+   201→      : tone === 'yellow'
+   202→        ? 'text-[#d29922]'
+   203→        : tone === 'green'
+   204→          ? 'text-[#3fb950]'
+   205→          : 'text-[#79c0ff]'
+   206→  return (
+   207→    <ul className={cn('space-y-1 font-mono text-[10px] leading-relaxed', color)}>
+   208→      {items.map((item, i) => (
+   209→        <li key={i} className="whitespace-pre-wrap break-words">
+   210→          • {item}
+   211→        </li>
+   212→      ))}
+   213→    </ul>
+   214→  )
+   215→}
+   216→
+   217→function FieldLabel({ children, htmlFor }: { children: React.ReactNode; htmlFor?: string }) {
+   218→  return (
+   219→    <label htmlFor={htmlFor} className="mb-1 block text-[10px] font-medium text-[#8b949e]">
+   220→      {children}
+   221→    </label>
+   222→  )
+   223→}
+   224→
+   225→function DarkTextarea({
+   226→  value,
+   227→  onChange,
+   228→  rows = 5,
+   229→  ariaLabel,
+   230→  mono = true,
+   231→}: {
+   232→  value: string
+   233→  onChange: (v: string) => void
+   234→  rows?: number
+   235→  ariaLabel: string
+   236→  mono?: boolean
+   237→}) {
+   238→  return (
+   239→    <textarea
+   240→      value={value}
+   241→      onChange={(e) => onChange(e.target.value)}
+   242→      rows={rows}
+   243→      aria-label={ariaLabel}
+   244→      spellCheck={false}
+   245→      className={cn(
+   246→        INPUT_DARK,
+   247→        'w-full resize-y rounded-md border p-2 leading-relaxed',
+   248→        mono ? 'font-mono text-[11px]' : 'text-xs',
+   249→        THIN_SCROLL,
+   250→      )}
+   251→    />
+   252→  )
+   253→}
+   254→
+   255→function SectionCard({
+   256→  title,
+   257→  children,
+   258→  action,
+   259→}: {
+   260→  title: string
+   261→  children: React.ReactNode
+   262→  action?: React.ReactNode
+   263→}) {
+   264→  return (
+   265→    <Panel className="p-3">
+   266→      <div className="mb-2 flex items-center justify-between gap-2">
+   267→        <TinyLabel>{title}</TinyLabel>
+   268→        {action}
+   269→      </div>
+   270→      {children}
+   271→    </Panel>
+   272→  )
+   273→}
+   274→
+   275→/* ------------------------------------------------------------------ */
+   276→/* GUARD — Task 3 inspector                                            */
+   277→/* ------------------------------------------------------------------ */
+   278→
+   279→function GuardrailsInspector({
+   280→  sessionId,
+   281→  onDone,
+   282→}: {
+   283→  sessionId: string
+   284→  onDone: () => void
+   285→}) {
+   286→  const { toast } = useToast()
+   287→  const [filePath, setFilePath] = React.useState(GUARD_DEMO_FILE)
+   288→  const [previousContent, setPreviousContent] = React.useState(GUARD_DEMO_PREVIOUS)
+   289→  const [proposedContent, setProposedContent] = React.useState(GUARD_DEMO_PROPOSED)
+   290→  const [userPrompt, setUserPrompt] = React.useState(GUARD_DEMO_PROMPT)
+   291→  const [allowedDeletions, setAllowedDeletions] = React.useState('')
+   292→  const [running, setRunning] = React.useState(false)
+   293→  const [report, setReport] = React.useState<GuardrailInspectionReport | null>(null)
+   294→
+   295→  const run = async () => {
+   296→    if (!filePath.trim() || !proposedContent.trim()) {
+   297→      toast({
+   298→        title: 'Guardrails need input',
+   299→        description: 'Target file path and proposed content are required.',
+   300→        variant: 'destructive',
+   301→        ...TOAST_DARK,
+   302→      })
+   303→      return
+   304→    }
+   305→    setRunning(true)
+   306→    setReport(null)
+   307→    try {
+   308→      const res = await apexpadApi.inspectGuardrails({
+   309→        sessionId,
+   310→        targetFilePath: filePath.trim(),
+   311→        previousContent,
+   312→        proposedContent,
+   313→        userPrompt,
+   314→        allowedSymbolDeletions: allowedDeletions
+   315→          .split(',')
+   316→          .map((s) => s.trim())
+   317→          .filter(Boolean),
+   318→      })
+   319→      setReport(res.report)
+   320→      onDone()
+   321→      toast({
+   322→        title: res.report.passedAllGates ? 'All guardrail gates passed' : 'Guardrail gate violations',
+   323→        description: `${res.report.guardId} • healed: ${res.report.wasAutoHealed ? 'yes' : 'no'} • hallucinated imports: ${res.report.hallucinatedImports.length}`,
+   324→        variant: res.report.passedAllGates ? 'default' : 'destructive',
+   325→        ...TOAST_DARK,
+   326→      })
+   327→    } catch (err) {
+   328→      toast({
+   329→        title: 'Guardrails run failed',
+   330→        description: err instanceof Error ? err.message : String(err),
+   331→        variant: 'destructive',
+   332→        ...TOAST_DARK,
+   333→      })
+   334→    } finally {
+   335→      setRunning(false)
+   336→    }
+   337→  }
+   338→
+   339→  return (
+   340→    <div className="flex flex-col gap-3">
+   341→      <SectionCard
+   342→        title="Task 3 — candidate edit inspection"
+   343→        action={
+   344→          <button
+   345→            type="button"
+   346→            onClick={() => {
+   347→              setFilePath(GUARD_DEMO_FILE)
+   348→              setPreviousContent(GUARD_DEMO_PREVIOUS)
+   349→              setProposedContent(GUARD_DEMO_PROPOSED)
+   350→              setUserPrompt(GUARD_DEMO_PROMPT)
+   351→              setAllowedDeletions('')
+   352→              setReport(null)
+   353→            }}
+   354→            className="inline-flex items-center gap-1 rounded-md border border-[#30363d] bg-[#21262d] px-2 py-1 text-[10px] text-[#8b949e] hover:text-[#e6edf3]"
+   355→          >
+   356→            <RotateCcw className="h-3 w-3" /> §7.7 demo
+   357→          </button>
+   358→        }
+   359→      >
+   360→        <div className="space-y-2">
+   361→          <div>
+   362→            <FieldLabel htmlFor="guard-file">Target file path</FieldLabel>
+   363→            <input
+   364→              id="guard-file"
+   365→              value={filePath}
+   366→              onChange={(e) => setFilePath(e.target.value)}
+   367→              className={cn(INPUT_DARK, 'w-full rounded-md border px-2 py-1.5')}
+   368→              placeholder="src/security/sessionAuth.ts"
+   369→            />
+   370→          </div>
+   371→          <div>
+   372→            <FieldLabel htmlFor="guard-prev">Previous file version (AST splice source)</FieldLabel>
+   373→            <DarkTextarea
+   374→              value={previousContent}
+   375→              onChange={setPreviousContent}
+   376→              rows={7}
+   377→              ariaLabel="Previous file version"
+   378→            />
+   379→          </div>
+   380→          <div>
+   381→            <FieldLabel htmlFor="guard-prop">Proposed (LLM) content — try lazy truncation</FieldLabel>
+   382→            <DarkTextarea
+   383→              value={proposedContent}
+   384→              onChange={setProposedContent}
+   385→              rows={7}
+   386→              ariaLabel="Proposed content"
+   387→            />
+   388→          </div>
+   389→          <div>
+   390→            <FieldLabel htmlFor="guard-prompt">User prompt (premise critic input)</FieldLabel>
+   391→            <input
+   392→              id="guard-prompt"
+   393→              value={userPrompt}
+   394→              onChange={(e) => setUserPrompt(e.target.value)}
+   395→              className={cn(INPUT_DARK, 'w-full rounded-md border px-2 py-1.5')}
+   396→            />
+   397→          </div>
+   398→          <div>
+   399→            <FieldLabel htmlFor="guard-allowed-deletions">
+   400→              Approved deletions — symbols the healer must NOT restore (comma-separated, optional)
+   401→            </FieldLabel>
+   402→            <input
+   403→              id="guard-allowed-deletions"
+   404→              value={allowedDeletions}
+   405→              onChange={(e) => setAllowedDeletions(e.target.value)}
+   406→              className={cn(INPUT_DARK, 'w-full rounded-md border px-2 py-1.5')}
+   407→              placeholder="e.g. revokeAll, SessionAuth.revokeSessionToken"
+   408→            />
+   409→          </div>
+   410→          <button
+   411→            type="button"
+   412→            onClick={() => void run()}
+   413→            disabled={running}
+   414→            className={cn(
+   415→              BTN_PRIMARY,
+   416→              'inline-flex min-h-[44px] w-full items-center justify-center gap-2 rounded-md px-3 text-xs font-semibold disabled:opacity-60',
+   417→            )}
+   418→          >
+   419→            {running ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ShieldCheck className="h-4 w-4" />}
+   420→            {running ? 'Running 4 gates…' : 'Run Guardrails'}
+   421→          </button>
+   422→        </div>
+   423→      </SectionCard>
+   424→
+   425→      {report ? (
+   426→        <SectionCard title={`Report ${report.guardId}`}>
+   427→          <div className="mb-3 flex flex-wrap gap-1.5">
+   428→            <GateBadge ok={report.passedAllGates} label={report.passedAllGates ? 'All gates passed' : 'Gates failed'} />
+   429→            <GateBadge ok={report.wasAutoHealed} label={report.wasAutoHealed ? 'Auto-healed' : 'No healing needed'} warn />
+   430→          </div>
+   431→
+   432→          <div className="space-y-3">
+   433→            <div>
+   434→              <TinyLabel className="mb-1">Truncation placeholders (recovered via AST splice)</TinyLabel>
+   435→              {report.truncationMatches.length === 0 ? (
+   436→                <p className="text-[11px] italic text-[#8b949e]">None detected.</p>
+   437→              ) : (
+   438→                <ul className="space-y-1 font-mono text-[10px] text-[#79c0ff]">
+   439→                  {report.truncationMatches.map((m, i) => (
+   440→                    <li key={i}>
+   441→                      line {m.lineNumber}: “{m.rawLine.trim()}” → spliced {m.recoveredSymbolNames.join(', ') || '—'}
+   442→                    </li>
+   443→                  ))}
+   444→                </ul>
+   445→              )}
+   446→            </div>
+   447→
+   448→            <div>
+   449→              <TinyLabel className="mb-1">Hallucinated imports</TinyLabel>
+   450→              <EvidenceList
+   451→                items={report.hallucinatedImports}
+   452→                tone="red"
+   453→                emptyText="Every import resolved cleanly."
+   454→              />
+   455→            </div>
+   456→
+   457→            <div>
+   458→              <TinyLabel className="mb-1">Version-skew warnings</TinyLabel>
+   459→              <EvidenceList
+   460→                items={report.versionSkewWarnings}
+   461→                tone="yellow"
+   462→                emptyText="No mixed framework conventions."
+   463→              />
+   464→            </div>
+   465→
+   466→            <div>
+   467→              <TinyLabel className="mb-1">Anti-sycophancy premise warnings</TinyLabel>
+   468→              <EvidenceList
+   469→                items={report.sycophancyWarnings}
+   470→                tone="yellow"
+   471→                emptyText="All user premises verified against the file/workspace."
+   472→              />
+   473→            </div>
+   474→
+   475→            <div>
+   476→              <div className="mb-1 flex items-center justify-between">
+   477→                <TinyLabel>Healed content (downstream staging input)</TinyLabel>
+   478→                <button
+   479→                  type="button"
+   480→                  onClick={() => void navigator.clipboard.writeText(report.healedContent)}
+   481→                  className="rounded-md border border-[#30363d] bg-[#21262d] px-2 py-0.5 text-[10px] text-[#8b949e] hover:text-[#e6edf3]"
+   482→                >
+   483→                  Copy
+   484→                </button>
+   485→              </div>
+   486→              <pre
+   487→                className={cn(
+   488→                  'max-h-64 overflow-auto rounded-md border border-[#30363d] bg-[#0d1117] p-2 font-mono text-[10px] leading-relaxed text-[#c9d1d9]',
+   489→                  THIN_SCROLL,
+   490→                )}
+   491→              >
+   492→                {report.healedContent}
+   493→              </pre>
+   494→            </div>
+   495→          </div>
+   496→        </SectionCard>
+   497→      ) : null}
+   498→    </div>
+   499→  )
+   500→}
+   501→
+   502→/* ------------------------------------------------------------------ */
+   503→/* BROWSER — Task 4 agent-browser console                              */
+   504→/* ------------------------------------------------------------------ */
+   505→
+   506→type BrowserLogEntry = {
+   507→  command: AgentBrowserActionCommand
+   508→  result: AgentBrowserActionExecutionResult
+   509→}
+   510→
+   511→function BrowserConsole({ sessionId }: { sessionId: string }) {
+   512→  const { toast } = useToast()
+   513→  const [url, setUrl] = React.useState(BROWSER_DEMO_URL)
+   514→  const [elementsJson, setElementsJson] = React.useState(BROWSER_DEMO_ELEMENTS)
+   515→  const [commandType, setCommandType] = React.useState<AgentBrowserActionCommand['commandType']>('snapshot')
+   516→  const [targetRef, setTargetRef] = React.useState('@e2')
+   517→  const [inputValue, setInputValue] = React.useState('')
+   518→  const [busy, setBusy] = React.useState<string | null>(null)
+   519→  const [log, setLog] = React.useState<BrowserLogEntry[]>([])
+   520→  const [state, setState] = React.useState<{
+   521→    livePageRevision: number
+   522→    refIds: string[]
+   523→    actionLog: string[]
+   524→  } | null>(null)
+   525→
+   526→  const parseElements = (): unknown[] | null => {
+   527→    try {
+   528→      const parsed: unknown = JSON.parse(elementsJson)
+   529→      if (!Array.isArray(parsed)) throw new Error('elements must be a JSON array')
+   530→      return parsed
+   531→    } catch (err) {
+   532→      toast({
+   533→        title: 'Invalid DOM state JSON',
+   534→        description: err instanceof Error ? err.message : String(err),
+   535→        variant: 'destructive',
+   536→        ...TOAST_DARK,
+   537→      })
+   538→      return null
+   539→    }
+   540→  }
+   541→
+   542→  const refreshState = React.useCallback(async () => {
+   543→    try {
+   544→      const res = await apexpadApi.getBrowserSessionState(sessionId)
+   545→      setState({
+   546→        livePageRevision: res.state.livePage?.revision ?? 0,
+   547→        refIds: res.state.activeRefMap?.refIds ?? [],
+   548→        actionLog: res.state.actionLog,
+   549→      })
+   550→    } catch {
+   551→      /* state probe is best-effort */
+   552→    }
+   553→  }, [sessionId])
+   554→
+   555→  React.useEffect(() => {
+   556→    void refreshState()
+   557→  }, [refreshState])
+   558→
+   559→  const seed = async () => {
+   560→    const elements = parseElements()
+   561→    if (!elements) return
+   562→    setBusy('seed')
+   563→    try {
+   564→      const res = await apexpadApi.setLiveDomState({ sessionId, url: url.trim(), elements: elements as never })
+   565→      toast({
+   566→        title: 'Live DOM state seeded',
+   567→        description: `revision ${res.livePage.revision} • ${res.livePage.elementCount} interactive element(s)`,
+   568→        ...TOAST_DARK,
+   569→      })
+   570→      await refreshState()
+   571→    } catch (err) {
+   572→      toast({
+   573→        title: 'Seeding failed',
+   574→        description: err instanceof Error ? err.message : String(err),
+   575→        variant: 'destructive',
+   576→        ...TOAST_DARK,
+   577→      })
+   578→    } finally {
+   579→      setBusy(null)
+   580→    }
+   581→  }
+   582→
+   583→  const execute = async () => {
+   584→    setBusy('exec')
+   585→    const command: AgentBrowserActionCommand =
+   586→      commandType === 'fill'
+   587→        ? { commandType: 'fill', targetRefOrUrl: targetRef, inputValue }
+   588→        : { commandType, targetRefOrUrl: commandType === 'snapshot' || commandType === 'get_url' || commandType === 'close' ? undefined : targetRef }
+   589→    try {
+   590→      const res = await apexpadApi.executeAgentBrowserCommand({ sessionId, command })
+   591→      setLog((prev) => [{ command, result: res.result }, ...prev].slice(0, 12))
+   592→      if (!res.result.success) {
+   593→        toast({
+   594→          title: 'Loud failure (by design)',
+   595→          description: res.result.loudFailureReason ?? 'Action blocked by the verification policy.',
+   596→          variant: 'destructive',
+   597→          ...TOAST_DARK,
+   598→        })
+   599→      }
+   600→      await refreshState()
+   601→    } catch (err) {
+   602→      toast({
+   603→        title: 'Agent-browser command failed',
+   604→        description: err instanceof Error ? err.message : String(err),
+   605→        variant: 'destructive',
+   606→        ...TOAST_DARK,
+   607→      })
+   608→    } finally {
+   609→      setBusy(null)
+   610→    }
+   611→  }
+   612→
+   613→  return (
+   614→    <div className="flex flex-col gap-3">
+   615→      <SectionCard
+   616→        title="Live page DOM registry (capture daemon)"
+   617→        action={
+   618→          <button
+   619→            type="button"
+   620→            onClick={() => {
+   621→              setUrl(BROWSER_DEMO_URL)
+   622→              setElementsJson(BROWSER_DEMO_ELEMENTS)
+   623→              setTargetRef('@e2')
+   624→            }}
+   625→            className="inline-flex items-center gap-1 rounded-md border border-[#30363d] bg-[#21262d] px-2 py-1 text-[10px] text-[#8b949e] hover:text-[#e6edf3]"
+   626→          >
+   627→            <RotateCcw className="h-3 w-3" /> §7.7 demo
+   628→          </button>
+   629→        }
+   630→      >
+   631→        <div className="space-y-2">
+   632→          <div>
+   633→            <FieldLabel htmlFor="browser-url">Page URL (allowlist: 127.0.0.1 / localhost)</FieldLabel>
+   634→            <input
+   635→              id="browser-url"
+   636→              value={url}
+   637→              onChange={(e) => setUrl(e.target.value)}
+   638→              className={cn(INPUT_DARK, 'w-full rounded-md border px-2 py-1.5')}
+   639→            />
+   640→          </div>
+   641→          <div>
+   642→            <FieldLabel htmlFor="browser-elements">Interactive accessibility elements (JSON array)</FieldLabel>
+   643→            <DarkTextarea value={elementsJson} onChange={setElementsJson} rows={8} ariaLabel="DOM elements JSON" />
+   644→          </div>
+   645→          <button
+   646→            type="button"
+   647→            onClick={() => void seed()}
+   648→            disabled={busy === 'seed'}
+   649→            className={cn(
+   650→              BTN_SECONDARY,
+   651→              'inline-flex min-h-[44px] w-full items-center justify-center gap-2 rounded-md px-3 text-xs font-semibold disabled:opacity-60',
+   652→            )}
+   653→          >
+   654→            {busy === 'seed' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
+   655→            Seed DOM state (revision++)
+   656→          </button>
+   657→          {state ? (
+   658→            <p className="font-mono text-[10px] text-[#8b949e]">
+   659→              live revision {state.livePageRevision} • active refs: {state.refIds.join(' ') || 'none'}
+   660→            </p>
+   661→          ) : null}
+   662→        </div>
+   663→      </SectionCard>
+   664→
+   665→      <SectionCard title="Agent-browser command loop">
+   666→        <div className="space-y-2">
+   667→          <div className="grid grid-cols-2 gap-2">
+   668→            <div>
+   669→              <FieldLabel htmlFor="browser-cmd">Command</FieldLabel>
+   670→              <select
+   671→                id="browser-cmd"
+   672→                value={commandType}
+   673→                onChange={(e) => setCommandType(e.target.value as AgentBrowserActionCommand['commandType'])}
+   674→                className={cn(INPUT_DARK, 'w-full rounded-md border px-2 py-1.5')}
+   675→              >
+   676→                <option value="snapshot">snapshot -i</option>
+   677→                <option value="click">click</option>
+   678→                <option value="fill">fill</option>
+   679→                <option value="get_url">get_url</option>
+   680→                <option value="open">open</option>
+   681→                <option value="close">close</option>
+   682→              </select>
+   683→            </div>
+   684→            <div>
+   685→              <FieldLabel htmlFor="browser-ref">Target ref / URL</FieldLabel>
+   686→              <input
+   687→                id="browser-ref"
+   688→                value={targetRef}
+   689→                onChange={(e) => setTargetRef(e.target.value)}
+   690→                disabled={commandType === 'snapshot' || commandType === 'get_url' || commandType === 'close'}
+   691→                className={cn(INPUT_DARK, 'w-full rounded-md border px-2 py-1.5 disabled:opacity-50')}
+   692→                placeholder="@e1"
+   693→              />
+   694→            </div>
+   695→          </div>
+   696→          {commandType === 'fill' ? (
+   697→            <div>
+   698→              <FieldLabel htmlFor="browser-value">Input value</FieldLabel>
+   699→              <input
+   700→                id="browser-value"
+   701→                value={inputValue}
+   702→                onChange={(e) => setInputValue(e.target.value)}
+   703→                className={cn(INPUT_DARK, 'w-full rounded-md border px-2 py-1.5')}
+   704→              />
+   705→            </div>
+   706→          ) : null}
+   707→          <button
+   708→            type="button"
+   709→            onClick={() => void execute()}
+   710→            disabled={busy === 'exec'}
+   711→            className={cn(
+   712→              BTN_PRIMARY,
+   713→              'inline-flex min-h-[44px] w-full items-center justify-center gap-2 rounded-md px-3 text-xs font-semibold disabled:opacity-60',
+   714→            )}
+   715→          >
+   716→            {busy === 'exec' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ChevronRight className="h-4 w-4" />}
+   717→            Execute command
+   718→          </button>
+   719→        </div>
+   720→      </SectionCard>
+   721→
+   722→      {log.length > 0 ? (
+   723→        <SectionCard title="Execution results (CSPRNG-wrapped output)">
+   724→          <div className="space-y-2">
+   725→            {log.map((entry, i) => (
+   726→              <div
+   727→                key={`${entry.result.csprngBoundaryNonce}-${i}`}
+   728→                className={cn(
+   729→                  'rounded-md border p-2',
+   730→                  entry.result.success ? 'border-[#3fb950]/30 bg-[#3fb950]/5' : 'border-[#f85149]/30 bg-[#f85149]/5',
+   731→                )}
+   732→              >
+   733→                <div className="mb-1 flex items-center gap-1.5 text-[10px] font-semibold">
+   734→                  {entry.result.success ? (
+   735→                    <Check className="h-3 w-3 text-[#3fb950]" />
+   736→                  ) : (
+   737→                    <X className="h-3 w-3 text-[#f85149]" />
+   738→                  )}
+   739→                  <span className={entry.result.success ? 'text-[#3fb950]' : 'text-[#f85149]'}>
+   740→                    {entry.command.commandType}
+   741→                    {entry.command.targetRefOrUrl ? ` ${entry.command.targetRefOrUrl}` : ''}
+   742→                  </span>
+   743→                  <span className="ml-auto font-mono text-[9px] text-[#8b949e]">
+   744→                    {entry.result.executionLatencyMs}ms • nonce {entry.result.csprngBoundaryNonce.slice(0, 8)}…
+   745→                  </span>
+   746→                </div>
+   747→                {entry.result.loudFailureReason ? (
+   748→                  <p className="mb-1 text-[10px] font-medium text-[#f85149]">{entry.result.loudFailureReason}</p>
+   749→                ) : null}
+   750→                <pre
+   751→                  className={cn(
+   752→                    'max-h-32 overflow-auto whitespace-pre-wrap rounded border border-[#30363d] bg-[#0d1117] p-1.5 font-mono text-[9px] leading-relaxed text-[#8b949e]',
+   753→                    THIN_SCROLL,
+   754→                  )}
+   755→                >
+   756→                  {entry.result.wrappedSafeOutput}
+   757→                </pre>
+   758→              </div>
+   759→            ))}
+   760→          </div>
+   761→        </SectionCard>
+   762→      ) : null}
+   763→    </div>
+   764→  )
+   765→}
+   766→
+   767→/* ------------------------------------------------------------------ */
+   768→/* RUNTIME — Task 4 artifact verification                              */
+   769→/* ------------------------------------------------------------------ */
+   770→
+   771→function RuntimeVerifier({
+   772→  sessionId,
+   773→  stagedArtifacts,
+   774→  onReInflateCcr,
+   775→  onDone,
+   776→}: {
+   777→  sessionId: string
+   778→  stagedArtifacts: StagedArtifact[]
+   779→  onReInflateCcr: (ccrId: string) => void
+   780→  onDone: () => void
+   781→}) {
+   782→  const { toast } = useToast()
+   783→  const [artifactId, setArtifactId] = React.useState('')
+   784→  const [running, setRunning] = React.useState(false)
+   785→  const [report, setReport] = React.useState<RuntimeVerificationReport | null>(null)
+   786→
+   787→  React.useEffect(() => {
+   788→    if (!artifactId && stagedArtifacts.length > 0) {
+   789→      setArtifactId(stagedArtifacts[0].artifactId)
+   790→    }
+   791→  }, [stagedArtifacts, artifactId])
+   792→
+   793→  const run = async () => {
+   794→    if (!artifactId) {
+   795→      toast({
+   796→        title: 'No staged artifact selected',
+   797→        description: 'Stage a DAG run first (Agent panel → Stage as DAG Edit), then verify it here.',
+   798→        variant: 'destructive',
+   799→        ...TOAST_DARK,
+   800→      })
+   801→      return
+   802→    }
+   803→    setRunning(true)
+   804→    setReport(null)
+   805→    try {
+   806→      const res = await apexpadApi.runRuntimeVerification({ sessionId, artifactId })
+   807→      setReport(res.report)
+   808→      onDone()
+   809→      toast({
+   810→        title: res.report.overallStatus === 'verified_ready_for_approval' ? 'Artifact verified' : 'Verification failed',
+   811→        description: `${res.report.verificationId} • type-check: ${res.report.typeCheckPassed ? 'pass' : 'fail'} • test gate: ${res.report.testGatePassed ? 'pass' : 'fail'}`,
+   812→        variant: res.report.overallStatus === 'verified_ready_for_approval' ? 'default' : 'destructive',
+   813→        ...TOAST_DARK,
+   814→      })
+   815→    } catch (err) {
+   816→      toast({
+   817→        title: 'Runtime verification failed',
+   818→        description: err instanceof Error ? err.message : String(err),
+   819→        variant: 'destructive',
+   820→        ...TOAST_DARK,
+   821→      })
+   822→    } finally {
+   823→      setRunning(false)
+   824→    }
+   825→  }
+   826→
+   827→  const selected = stagedArtifacts.find((a) => a.artifactId === artifactId)
+   828→
+   829→  return (
+   830→    <div className="flex flex-col gap-3">
+   831→      <SectionCard title="Task 4 — staged artifact verification">
+   832→        <div className="space-y-2">
+   833→          <div>
+   834→            <FieldLabel htmlFor="verify-artifact">Staged artifact</FieldLabel>
+   835→            <select
+   836→              id="verify-artifact"
+   837→              value={artifactId}
+   838→              onChange={(e) => setArtifactId(e.target.value)}
+   839→              className={cn(INPUT_DARK, 'w-full rounded-md border px-2 py-1.5')}
+   840→            >
+   841→              {stagedArtifacts.length === 0 ? (
+   842→                <option value="">— no staged artifacts yet —</option>
+   843→              ) : null}
+   844→              {stagedArtifacts.map((a) => (
+   845→                <option key={a.artifactId} value={a.artifactId}>
+   846→                  {a.artifactId} • {a.targetFilePath} • {a.status}
+   847→                </option>
+   848→              ))}
+   849→            </select>
+   850→          </div>
+   851→          {selected ? (
+   852→            <p className="font-mono text-[10px] text-[#8b949e]">
+   853→              required tests from blast radius: {selected.blastRadius.requiredTests.join(', ') || 'none'}
+   854→            </p>
+   855→          ) : null}
+   856→          <button
+   857→            type="button"
+   858→            onClick={() => void run()}
+   859→            disabled={running}
+   860→            className={cn(
+   861→              BTN_PRIMARY,
+   862→              'inline-flex min-h-[44px] w-full items-center justify-center gap-2 rounded-md px-3 text-xs font-semibold disabled:opacity-60',
+   863→            )}
+   864→          >
+   865→            {running ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ShieldCheck className="h-4 w-4" />}
+   866→            {running ? 'Running gates…' : 'Run Verification'}
+   867→          </button>
+   868→        </div>
+   869→      </SectionCard>
+   870→
+   871→      {report ? (
+   872→        <SectionCard title={`Verification ${report.verificationId}`}>
+   873→          <div className="mb-3 flex flex-wrap gap-1.5">
+   874→            <GateBadge
+   875→              ok={report.overallStatus === 'verified_ready_for_approval'}
+   876→              label={report.overallStatus === 'verified_ready_for_approval' ? 'Verified — ready for approval' : 'Failed verification'}
+   877→            />
+   878→            <GateBadge ok={report.typeCheckPassed} label={report.typeCheckPassed ? 'tsc gate pass' : 'tsc gate fail'} />
+   879→            <GateBadge ok={report.testGatePassed} label={report.testGatePassed ? 'test gate pass' : 'test gate fail'} />
+   880→          </div>
+   881→
+   882→          <div className="space-y-3">
+   883→            <div>
+   884→              <TinyLabel className="mb-1">Type-check diagnostics (real tsc engine)</TinyLabel>
+   885→              <EvidenceList
+   886→                items={report.typeCheckDiagnostics}
+   887→                tone={report.typeCheckPassed ? 'green' : 'red'}
+   888→                emptyText="No diagnostics — the candidate type-checks cleanly in the sandbox program."
+   889→              />
+   890→            </div>
+   891→            <div>
+   892→              <TinyLabel className="mb-1">Test gate (existence • syntax • imports • symbol binding)</TinyLabel>
+   893→              <p className="font-mono text-[10px] text-[#8b949e]">
+   894→                executed: {report.executedTestFiles.join(', ') || 'none required by blast radius'}
+   895→              </p>
+   896→              {report.testRunnerOutputCcrId ? (
+   897→                <button
+   898→                  type="button"
+   899→                  onClick={() => onReInflateCcr(report.testRunnerOutputCcrId as string)}
+   900→                  className="mt-1 rounded-md border border-[#30363d] bg-[#21262d] px-2 py-0.5 text-[10px] text-[#79c0ff] hover:bg-[#30363d]"
+   901→                >
+   902→                  Re-inflate gate log {report.testRunnerOutputCcrId}
+   903→                </button>
+   904→              ) : null}
+   905→            </div>
+   906→            {report.agentBrowserResults.length > 0 ? (
+   907→              <div>
+   908→                <TinyLabel className="mb-1">Agent-browser loop ({report.agentBrowserResults.length} commands)</TinyLabel>
+   909→                <ul className="space-y-1">
+   910→                  {report.agentBrowserResults.map((r, i) => (
+   911→                    <li key={i} className="flex items-center gap-1.5 text-[10px]">
+   912→                      {r.success ? (
+   913→                        <Check className="h-3 w-3 shrink-0 text-[#3fb950]" />
+   914→                      ) : (
+   915→                        <X className="h-3 w-3 shrink-0 text-[#f85149]" />
+   916→                      )}
+   917→                      <span className="font-mono text-[#8b949e]">
+   918→                        {r.command.commandType}
+   919→                        {r.command.targetRefOrUrl ? ` ${r.command.targetRefOrUrl}` : ''}
+   920→                        {r.loudFailureReason ? ` — ${r.loudFailureReason}` : ''}
+   921→                      </span>
+   922→                    </li>
+   923→                  ))}
+   924→                </ul>
+   925→              </div>
+   926→            ) : null}
+   927→
+   928→            {/* PHASE 10 (GAP #3): real subprocess + CDP telemetry */}
+   929→            {report.compilerTrace || report.testRunnerTrace || report.cdpProbe ? (
+   930→              <div className="rounded-md border border-[#30363d] bg-[#0d1117] p-2">
+   931→                <TinyLabel className="mb-1.5">
+   932→                  Phase 10 subprocess telemetry (real child_process + CDP)
+   933→                </TinyLabel>
+   934→                <div className="space-y-2">
+   935→                  {report.compilerTrace ? (
+   936→                    <div className="flex items-start gap-1.5">
+   937→                      <TerminalSquare className="mt-0.5 h-3 w-3 shrink-0 text-[#79c0ff]" />
+   938→                      <div className="min-w-0 font-mono text-[9px] leading-relaxed text-[#8b949e]">
+   939→                        <p className="break-all">
+   940→                          compiler: <span className="text-[#79c0ff]">{report.compilerTrace.command}</span>
+   941→                        </p>
+   942→                        <p>
+   943→                          exitCode:{' '}
+   944→                          <span className={report.compilerTrace.exitCode === 0 ? 'text-[#3fb950]' : 'text-[#f85149]'}>
+   945→                            {report.compilerTrace.exitCode}
+   946→                          </span>{' '}
+   947→                          • {report.compilerTrace.durationMs}ms
+   948→                          {report.compilerTrace.ccrId ? ` • CCR ${report.compilerTrace.ccrId}` : ''}
+   949→                        </p>
+   950→                        {report.compilerTrace.stderrTail ? (
+   951→                          <p className="whitespace-pre-wrap break-all text-[#d29922]">
+   952→                            {report.compilerTrace.stderrTail.slice(0, 300)}
+   953→                          </p>
+   954→                        ) : null}
+   955→                      </div>
+   956→                    </div>
+   957→                  ) : null}
+   958→                  {report.testRunnerTrace ? (
+   959→                    <div className="flex items-start gap-1.5">
+   960→                      <TerminalSquare className="mt-0.5 h-3 w-3 shrink-0 text-[#7ee787]" />
+   961→                      <div className="min-w-0 font-mono text-[9px] leading-relaxed text-[#8b949e]">
+   962→                        <p className="break-all">
+   963→                          test runner: <span className="text-[#7ee787]">{report.testRunnerTrace.command}</span>
+   964→                        </p>
+   965→                        <p>
+   966→                          exitCode:{' '}
+   967→                          <span className={report.testRunnerTrace.exitCode === 0 ? 'text-[#3fb950]' : 'text-[#f85149]'}>
+   968→                            {report.testRunnerTrace.exitCode}
+   969→                          </span>{' '}
+   970→                          • {report.testRunnerTrace.durationMs}ms
+   971→                          {report.testRunnerTrace.ccrId ? ` • CCR ${report.testRunnerTrace.ccrId}` : ''}
+   972→                        </p>
+   973→                        {report.testRunnerTrace.stdoutTail ? (
+   974→                          <p className="whitespace-pre-wrap break-all">{report.testRunnerTrace.stdoutTail.slice(0, 300)}</p>
+   975→                        ) : null}
+   976→                      </div>
+   977→                    </div>
+   978→                  ) : (
+   979→                    <p className="font-mono text-[9px] text-[#8b949e]">
+   980→                      test runner: deterministic ripwire gate (no workspace-indexed test files to execute)
+   981→                    </p>
+   982→                  )}
+   983→                  {report.cdpProbe ? (
+   984→                    <div className="flex items-start gap-1.5">
+   985→                      <Globe className="mt-0.5 h-3 w-3 shrink-0 text-[#d2a8ff]" />
+   986→                      <div className="min-w-0 font-mono text-[9px] leading-relaxed text-[#8b949e]">
+   987→                        <p>
+   988→                          CDP probe: <span className="text-[#d2a8ff]">{report.cdpProbe.endpoint}</span> —{' '}
+   989→                          <span className={report.cdpProbe.reachable ? 'text-[#3fb950]' : 'text-[#d29922]'}>
+   990→                            {report.cdpProbe.reachable ? `reachable, ${report.cdpProbe.targetCount} target(s)` : 'unreachable (deterministic RefMap fallback)'}
+   991→                          </span>
+   992→                          {report.cdpProbe.error ? ` • ${report.cdpProbe.error}` : ''}
+   993→                        </p>
+   994→                        {report.cdpProbe.activePageUrl ? (
+   995→                          <p className="break-all">active page: {report.cdpProbe.activePageUrl}</p>
+   996→                        ) : null}
+   997→                      </div>
+   998→                    </div>
+   999→                  ) : null}
+  1000→                </div>
+  1001→              </div>
+  1002→            ) : null}
+  1003→          </div>
+  1004→        </SectionCard>
+  1005→      ) : null}
+  1006→    </div>
+  1007→  )
+  1008→}
+  1009→
+  1010→/* ------------------------------------------------------------------ */
+  1011→/* PIPELINE — §7.6 unified runner                                      */
+  1012→/* ------------------------------------------------------------------ */
+  1013→
+  1014→interface EditableEdit {
+  1015→  targetFilePath: string
+  1016→  previousContent: string
+  1017→  proposedContent: string
+  1018→}
+  1019→
+  1020→function PipelineRunner({
+  1021→  sessionId,
+  1022→  envelope,
+  1023→  onDone,
+  1024→}: {
+  1025→  sessionId: string
+  1026→  envelope: PackedContextEnvelope | null
+  1027→  onDone: () => void
+  1028→}) {
+  1029→  const { toast } = useToast()
+  1030→  const [prompt, setPrompt] = React.useState(PIPELINE_DEMO_PROMPT)
+  1031→  const [budget, setBudget] = React.useState(12000)
+  1032→  const [strictQuarantine, setStrictQuarantine] = React.useState(true)
+  1033→  const [edits, setEdits] = React.useState<EditableEdit[]>([
+  1034→    {
+  1035→      targetFilePath: 'src/service/user.ts',
+  1036→      previousContent: SERVICE_DEMO_PREVIOUS,
+  1037→      proposedContent: SERVICE_DEMO_PROPOSED,
+  1038→    },
+  1039→    {
+  1040→      targetFilePath: GUARD_DEMO_FILE,
+  1041→      previousContent: GUARD_DEMO_PREVIOUS,
+  1042→      proposedContent: GUARD_DEMO_PROPOSED,
+  1043→    },
+  1044→  ])
+  1045→  const [running, setRunning] = React.useState(false)
+  1046→  const [result, setResult] = React.useState<FullApexPipelineResult | null>(null)
+  1047→
+  1048→  React.useEffect(() => {
+  1049→    if (envelope?.tokenBudgetCeiling) {
+  1050→      setBudget((prev) => (prev === 12000 ? envelope.tokenBudgetCeiling : prev))
+  1051→    }
+  1052→  }, [envelope])
+  1053→
+  1054→  const updateEdit = (idx: number, patch: Partial<EditableEdit>) => {
+  1055→    setEdits((prev) => prev.map((e, i) => (i === idx ? { ...e, ...patch } : e)))
+  1056→  }
+  1057→
+  1058→  const run = async () => {
+  1059→    if (!prompt.trim()) {
+  1060→      toast({
+  1061→        title: 'Prompt required',
+  1062→        description: 'The pipeline compiles the raw prompt into the Spec Contract.',
+  1063→        variant: 'destructive',
+  1064→        ...TOAST_DARK,
+  1065→      })
+  1066→      return
+  1067→    }
+  1068→    setRunning(true)
+  1069→    setResult(null)
+  1070→    try {
+  1071→      const res = await apexpadApi.runFullPipeline({
+  1072→        sessionId,
+  1073→        rawUserPrompt: prompt,
+  1074→        tokenBudgetCeiling: budget,
+  1075→        candidateEdits: edits,
+  1076→        strictQuarantineGate: strictQuarantine,
+  1077→      })
+  1078→      setResult(res.result)
+  1079→      onDone()
+  1080→      toast({
+  1081→        title: res.result.pipelineBlockedByQuarantine
+  1082→          ? `Quarantine gate blocked ${res.result.quarantinedEdits.length} edit(s)`
+  1083→          : '4-stage pipeline complete',
+  1084→        description: res.result.pipelineBlockedByQuarantine
+  1085→          ? `${res.result.quarantinedEdits.map((q) => q.targetFilePath).join(', ')} never reached staging — blocking reasons recorded.`
+  1086→          : `${res.result.specContract.specId} • ${res.result.guardrailReports.length} guardrail report(s) • ${res.result.dagState.status} • ${res.result.verificationReports.filter((v) => v.overallStatus === 'verified_ready_for_approval').length}/${res.result.verificationReports.length} verified`,
+  1087→        variant: res.result.pipelineBlockedByQuarantine || res.result.dagState.status === 'halted_on_violation' ? 'destructive' : 'default',
+  1088→        ...TOAST_DARK,
+  1089→      })
+  1090→    } catch (err) {
+  1091→      toast({
+  1092→        title: 'Pipeline run failed',
+  1093→        description: err instanceof Error ? err.message : String(err),
+  1094→        variant: 'destructive',
+  1095→        ...TOAST_DARK,
+  1096→      })
+  1097→    } finally {
+  1098→      setRunning(false)
+  1099→    }
+  1100→  }
+  1101→
+  1102→  return (
+  1103→    <div className="flex flex-col gap-3">
+  1104→      <SectionCard
+  1105→        title="§7.6 — unified 4-stage engineering pipeline"
+  1106→        action={
+  1107→          <button
+  1108→            type="button"
+  1109→            onClick={() => {
+  1110→              setPrompt(PIPELINE_DEMO_PROMPT)
+  1111→              setEdits([
+  1112→                {
+  1113→                  targetFilePath: 'src/service/user.ts',
+  1114→                  previousContent: SERVICE_DEMO_PREVIOUS,
+  1115→                  proposedContent: SERVICE_DEMO_PROPOSED,
+  1116→                },
+  1117→                {
+  1118→                  targetFilePath: GUARD_DEMO_FILE,
+  1119→                  previousContent: GUARD_DEMO_PREVIOUS,
+  1120→                  proposedContent: GUARD_DEMO_PROPOSED,
+  1121→                },
+  1122→              ])
+  1123→              setResult(null)
+  1124→            }}
+  1125→            className="inline-flex items-center gap-1 rounded-md border border-[#30363d] bg-[#21262d] px-2 py-1 text-[10px] text-[#8b949e] hover:text-[#e6edf3]"
+  1126→          >
+  1127→            <RotateCcw className="h-3 w-3" /> Demo
+  1128→          </button>
+  1129→        }
+  1130→      >
+  1131→        <div className="space-y-2">
+  1132→          <div>
+  1133→            <FieldLabel htmlFor="pipeline-prompt">Raw user prompt (Task 2 input)</FieldLabel>
+  1134→            <DarkTextarea value={prompt} onChange={setPrompt} rows={3} ariaLabel="Pipeline prompt" mono={false} />
+  1135→          </div>
+  1136→          <div>
+  1137→            <FieldLabel htmlFor="pipeline-budget">Token budget ceiling</FieldLabel>
+  1138→            <input
+  1139→              id="pipeline-budget"
+  1140→              type="number"
+  1141→              min={1000}
+  1142→              max={100000}
+  1143→              value={budget}
+  1144→              onChange={(e) => setBudget(Number(e.target.value) || 12000)}
+  1145→              className={cn(INPUT_DARK, 'w-full rounded-md border px-2 py-1.5')}
+  1146→            />
+  1147→          </div>
+  1148→          {/* PHASE 10 (GAP #2): strict pre-staging quarantine gate toggle */}
+  1149→          <label className="flex cursor-pointer items-center gap-2 rounded-md border border-[#30363d] bg-[#0d1117] px-2 py-2">
+  1150→            <input
+  1151→              type="checkbox"
+  1152→              checked={strictQuarantine}
+  1153→              onChange={(e) => setStrictQuarantine(e.target.checked)}
+  1154→              className="h-3.5 w-3.5 accent-[#f85149]"
+  1155→            />
+  1156→            <span className="font-mono text-[10px] text-[#c9d1d9]">
+  1157→              Strict quarantine gate — failing edits are hard-blocked before staging
+  1158→            </span>
+  1159→          </label>
+  1160→          <button
+  1161→            type="button"
+  1162→            onClick={() => void run()}
+  1163→            disabled={running}
+  1164→            className={cn(
+  1165→              BTN_PRIMARY,
+  1166→              'inline-flex min-h-[44px] w-full items-center justify-center gap-2 rounded-md px-3 text-xs font-semibold disabled:opacity-60',
+  1167→            )}
+  1168→          >
+  1169→            {running ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-4 w-4" />}
+  1170→            {running ? 'Running 4 stages…' : 'Run Full Pipeline'}
+  1171→          </button>
+  1172→        </div>
+  1173→      </SectionCard>
+  1174→
+  1175→      <SectionCard title={`Candidate edits (${edits.length})`}>
+  1176→        <div className="space-y-3">
+  1177→          {edits.map((edit, idx) => (
+  1178→            <div key={idx} className="rounded-md border border-[#30363d] bg-[#0d1117] p-2">
+  1179→              <div className="mb-1.5 flex items-center gap-2">
+  1180→                <span className="font-mono text-[10px] text-[#79c0ff]">edit #{idx + 1}</span>
+  1181→                <input
+  1182→                  value={edit.targetFilePath}
+  1183→                  onChange={(e) => updateEdit(idx, { targetFilePath: e.target.value })}
+  1184→                  aria-label={`Edit ${idx + 1} target file path`}
+  1185→                  className={cn(INPUT_DARK, 'flex-1 rounded border px-2 py-1 text-[10px]')}
+  1186→                />
+  1187→                {edits.length > 1 ? (
+  1188→                  <button
+  1189→                    type="button"
+  1190→                    aria-label={`Remove edit ${idx + 1}`}
+  1191→                    onClick={() => setEdits((prev) => prev.filter((_, i) => i !== idx))}
+  1192→                    className="rounded p-1 text-[#8b949e] hover:text-[#f85149]"
+  1193→                  >
+  1194→                    <Trash2 className="h-3.5 w-3.5" />
+  1195→                  </button>
+  1196→                ) : null}
+  1197→              </div>
+  1198→              <FieldLabel>previous</FieldLabel>
+  1199→              <DarkTextarea
+  1200→                value={edit.previousContent}
+  1201→                onChange={(v) => updateEdit(idx, { previousContent: v })}
+  1202→                rows={4}
+  1203→                ariaLabel={`Edit ${idx + 1} previous content`}
+  1204→              />
+  1205→              <div className="mt-1.5">
+  1206→                <FieldLabel>proposed</FieldLabel>
+  1207→                <DarkTextarea
+  1208→                  value={edit.proposedContent}
+  1209→                  onChange={(v) => updateEdit(idx, { proposedContent: v })}
+  1210→                  rows={4}
+  1211→                  ariaLabel={`Edit ${idx + 1} proposed content`}
+  1212→                />
+  1213→              </div>
+  1214→            </div>
+  1215→          ))}
+  1216→          <button
+  1217→            type="button"
+  1218→            onClick={() =>
+  1219→              setEdits((prev) => [...prev, { targetFilePath: '', previousContent: '', proposedContent: '' }])
+  1220→            }
+  1221→            className={cn(
+  1222→              BTN_SECONDARY,
+  1223→              'inline-flex min-h-[44px] w-full items-center justify-center gap-2 rounded-md px-3 text-xs',
+  1224→            )}
+  1225→          >
+  1226→            <Plus className="h-3.5 w-3.5" /> Add candidate edit
+  1227→          </button>
+  1228→        </div>
+  1229→      </SectionCard>
+  1230→
+  1231→      {result ? (
+  1232→        <>
+  1233→          {result.pipelineBlockedByQuarantine ? (
+  1234→            <SectionCard title="PHASE 10 — HARD QUARANTINE GATE (blocked before staging)">
+  1235→              <div className="space-y-2">
+  1236→                {result.quarantinedEdits.map((q) => (
+  1237→                  <div
+  1238→                    key={q.quarantineId}
+  1239→                    className="rounded-md border border-[#f85149]/50 bg-[#f85149]/5 p-2"
+  1240→                  >
+  1241→                    <div className="mb-1 flex items-center gap-1.5">
+  1242→                      <AlertTriangle className="h-3.5 w-3.5 text-[#f85149]" />
+  1243→                      <span className="break-all font-mono text-[10px] font-bold text-[#f85149]">
+  1244→                        {q.targetFilePath}
+  1245→                      </span>
+  1246→                    </div>
+  1247→                    <ul className="space-y-0.5">
+  1248→                      {q.blockingReasons.map((reason, i) => (
+  1249→                        <li key={i} className="font-mono text-[9px] leading-relaxed text-[#f85149]/90">
+  1250→                          ⚠ {reason}
+  1251→                        </li>
+  1252→                      ))}
+  1253→                    </ul>
+  1254→                    <p className="mt-1 font-mono text-[9px] text-[#8b949e]">
+  1255→                      quarantined {new Date(q.quarantinedAt).toLocaleString()} — persisted to
+  1256→                      quarantined_edits; NEVER staged.
+  1257→                    </p>
+  1258→                  </div>
+  1259→                ))}
+  1260→              </div>
+  1261→            </SectionCard>
+  1262→          ) : null}
+  1263→
+  1264→          <SectionCard title="Stage 1 — Specification Contract (Task 2)">
+  1265→            <div className="space-y-1 font-mono text-[10px] text-[#8b949e]">
+  1266→              <p>
+  1267→                <span className="text-[#79c0ff]">{result.specContract.specId}</span> • split:{' '}
+  1268→                {String(result.specContract.isOverloadedPromptSplit)} • complexity:{' '}
+  1269→                {result.specContract.estimatedReasoningComplexity} • subtasks:{' '}
+  1270→                {result.specContract.subtaskDag.length}
+  1271→              </p>
+  1272→              <p className="whitespace-pre-wrap break-words">{result.specContract.normalizedGoal}</p>
+  1273→              <div className="mt-1">
+  1274→                <TinyLabel className="mb-1">Injected implicit constraints</TinyLabel>
+  1275→                <EvidenceList items={result.specContract.injectedImplicitConstraints} tone="blue" />
+  1276→              </div>
+  1277→            </div>
+  1278→          </SectionCard>
+  1279→
+  1280→          <SectionCard title="Stage 2 — Guardrails (Task 3)">
+  1281→            <div className="space-y-2">
+  1282→              {result.guardrailReports.map((g) => (
+  1283→                <div key={g.guardId} className="rounded-md border border-[#30363d] p-2">
+  1284→                  <div className="mb-1 flex flex-wrap items-center gap-1.5">
+  1285→                    <span className="font-mono text-[10px] text-[#79c0ff]">{g.targetFilePath}</span>
+  1286→                    <GateBadge ok={g.passedAllGates} label={g.passedAllGates ? 'pass' : 'fail'} />
+  1287→                    {g.wasAutoHealed ? <GateBadge ok label={`healed (+${g.missingSymbolsRecovered.length})`} warn /> : null}
+  1288→                  </div>
+  1289→                  <EvidenceList items={g.hallucinatedImports} tone="red" />
+  1290→                  <EvidenceList items={g.sycophancyWarnings} tone="yellow" />
+  1291→                </div>
+  1292→              ))}
+  1293→            </div>
+  1294→          </SectionCard>
+  1295→
+  1296→          <SectionCard title="Stage 3 — DAG Staging (Task 1)">
+  1297→            <div className="space-y-1 font-mono text-[10px] text-[#8b949e]">
+  1298→              <p>
+  1299→                <span className="text-[#79c0ff]">{result.dagState.runId}</span> • status:{' '}
+  1300→                <span
+  1301→                  className={
+  1302→                    result.dagState.status === 'halted_on_violation' ? 'text-[#f85149]' : 'text-[#3fb950]'
+  1303→                  }
+  1304→                >
+  1305→                  {result.dagState.status}
+  1306→                </span>{' '}
+  1307→                • staged artifacts: {result.dagState.stagedArtifacts.length}
+  1308→              </p>
+  1309→              <p>planner subtasks: {result.dagState.plannerSubtasks.length} • research findings: {result.dagState.researchFindings.length}</p>
+  1310→            </div>
+  1311→          </SectionCard>
+  1312→
+  1313→          <SectionCard title="Stage 4 — Runtime Verification (Task 4)">
+  1314→            <div className="space-y-2">
+  1315→              {result.verificationReports.map((v) => (
+  1316→                <div key={v.verificationId} className="rounded-md border border-[#30363d] p-2">
+  1317→                  <div className="mb-1 flex flex-wrap items-center gap-1.5">
+  1318→                    <span className="font-mono text-[10px] text-[#79c0ff]">{v.targetFilePath}</span>
+  1319→                    <GateBadge
+  1320→                      ok={v.overallStatus === 'verified_ready_for_approval'}
+  1321→                      label={v.overallStatus === 'verified_ready_for_approval' ? 'verified' : 'failed'}
+  1322→                    />
+  1323→                    <GateBadge ok={v.typeCheckPassed} label={v.typeCheckPassed ? 'tsc ✓' : 'tsc ✗'} />
+  1324→                    <GateBadge ok={v.testGatePassed} label={v.testGatePassed ? 'tests ✓' : 'tests ✗'} />
+  1325→                  </div>
+  1326→                  <EvidenceList items={v.typeCheckDiagnostics} tone={v.typeCheckPassed ? 'green' : 'red'} />
+  1327→                </div>
+  1328→              ))}
+  1329→            </div>
+  1330→          </SectionCard>
+  1331→        </>
+  1332→      ) : null}
+  1333→    </div>
+  1334→  )
+  1335→}
+  1336→
+  1337→/* ------------------------------------------------------------------ */
+  1338→/* SUITE — §7.7 verification suite                                     */
+  1339→/* ------------------------------------------------------------------ */
+  1340→
+  1341→function SuiteRunner() {
+  1342→  const { toast } = useToast()
+  1343→  const [running, setRunning] = React.useState(false)
+  1344→  const [run, setRun] = React.useState<E2eSuiteRunReport | null>(null)
+  1345→
+  1346→  const execute = async () => {
+  1347→    setRunning(true)
+  1348→    setRun(null)
+  1349→    try {
+  1350→      const res = await apexpadApi.runE2eSuite()
+  1351→      setRun(res.run)
+  1352→      toast({
+  1353→        title: res.run.allPassed ? 'E2E suite: ALL GREEN' : 'E2E suite: failures detected',
+  1354→        description: `${res.run.runId} • ${res.run.scenarios.length} scenarios • ${res.run.durationMs}ms`,
+  1355→        variant: res.run.allPassed ? 'default' : 'destructive',
+  1356→        ...TOAST_DARK,
+  1357→      })
+  1358→    } catch (err) {
+  1359→      toast({
+  1360→        title: 'Suite execution failed',
+  1361→        description: err instanceof Error ? err.message : String(err),
+  1362→        variant: 'destructive',
+  1363→        ...TOAST_DARK,
+  1364→      })
+  1365→    } finally {
+  1366→      setRunning(false)
+  1367→    }
+  1368→  }
+  1369→
+  1370→  return (
+  1371→    <div className="flex flex-col gap-3">
+  1372→      <SectionCard title="§7.7 — End-to-End Verification Suite (Tasks 2, 3, 4)">
+  1373→        <p className="mb-3 text-[11px] leading-relaxed text-[#8b949e]">
+  1374→          Executes the blueprint’s three behavioral invariants live against the engine, inside the
+  1375→          isolated <span className="font-mono text-[#79c0ff]">apexpad-tasks-234-test</span> project:
+  1376→          overloaded prompt decomposition + DNA injection, anti-truncation splicing + hallucinated
+  1377→          import blocking + premise critique, and the Agent-Browser @e1 RefMap loop with loud
+  1378→          failures and CSPRNG boundaries.
+  1379→        </p>
+  1380→        <button
+  1381→          type="button"
+  1382→          onClick={() => void execute()}
+  1383→          disabled={running}
+  1384→          className={cn(
+  1385→            BTN_PRIMARY,
+  1386→            'inline-flex min-h-[44px] w-full items-center justify-center gap-2 rounded-md px-3 text-xs font-semibold disabled:opacity-60',
+  1387→          )}
+  1388→        >
+  1389→          {running ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <FlaskConical className="h-4 w-4" />}
+  1390→          {running ? 'Running suite…' : 'Run E2E Verification Suite'}
+  1391→        </button>
+  1392→      </SectionCard>
+  1393→
+  1394→      {run ? (
+  1395→        <>
+  1396→          <div className="flex items-center justify-between rounded-md border border-[#30363d] bg-[#0d1117] px-3 py-2">
+  1397→            <span className="font-mono text-[10px] text-[#8b949e]">
+  1398→              run {run.runId} • {run.durationMs}ms
+  1399→            </span>
+  1400→            <GateBadge ok={run.allPassed} label={run.allPassed ? 'all scenarios green' : 'failures present'} />
+  1401→          </div>
+  1402→          {run.scenarios.map((scenario) => (
+  1403→            <SectionCard key={scenario.scenarioId} title={scenario.scenarioId}>
+  1404→              <div className="mb-2 flex items-center justify-between gap-2">
+  1405→                <p className="text-[11px] font-medium text-[#c9d1d9]">{scenario.title}</p>
+  1406→                <GateBadge ok={scenario.passed} label={scenario.passed ? 'pass' : 'fail'} />
+  1407→              </div>
+  1408→              <ul className="space-y-1.5">
+  1409→                {scenario.assertions.map((a, i) => (
+  1410→                  <li key={i} className="flex items-start gap-1.5">
+  1411→                    {a.passed ? (
+  1412→                      <Check className="mt-0.5 h-3 w-3 shrink-0 text-[#3fb950]" />
+  1413→                    ) : (
+  1414→                      <X className="mt-0.5 h-3 w-3 shrink-0 text-[#f85149]" />
+  1415→                    )}
+  1416→                    <div className="min-w-0">
+  1417→                      <p className="text-[11px] text-[#c9d1d9]">{a.name}</p>
+  1418→                      <p className="break-words font-mono text-[9px] leading-relaxed text-[#8b949e]">
+  1419→                        {a.evidence}
+  1420→                      </p>
+  1421→                    </div>
+  1422→                  </li>
+  1423→                ))}
+  1424→              </ul>
+  1425→              <p className="mt-2 font-mono text-[9px] text-[#8b949e]">
+  1426→                {scenario.assertions.filter((a) => a.passed).length}/{scenario.assertions.length} assertions •{' '}
+  1427→                {scenario.durationMs}ms
+  1428→              </p>
+  1429→            </SectionCard>
+  1430→          ))}
+  1431→        </>
+  1432→      ) : null}
+  1433→    </div>
+  1434→  )
+  1435→}
+  1436→
+  1437→/* ------------------------------------------------------------------ */
+  1438→/* The panel                                                           */
+  1439→/* ------------------------------------------------------------------ */
+  1440→
+  1441→export type VerifierSubTab = 'suite' | 'guard' | 'browser' | 'runtime' | 'pipeline'
+  1442→
+  1443→export function VerificationPanel({
+  1444→  sessionId,
+  1445→  stagedArtifacts,
+  1446→  envelope,
+  1447→  onReInflateCcr,
+  1448→  onRefreshTelemetry,
+  1449→}: {
+  1450→  sessionId: string
+  1451→  stagedArtifacts: StagedArtifact[]
+  1452→  envelope: PackedContextEnvelope | null
+  1453→  onReInflateCcr: (ccrId: string) => void
+  1454→  onRefreshTelemetry: () => void
+  1455→}) {
+  1456→  const [subTab, setSubTab] = React.useState<VerifierSubTab>('suite')
+  1457→
+  1458→  const subTabs: { id: VerifierSubTab; label: string }[] = [
+  1459→    { id: 'suite', label: 'Suite' },
+  1460→    { id: 'guard', label: 'Guard' },
+  1461→    { id: 'browser', label: 'Browser' },
+  1462→    { id: 'runtime', label: 'Runtime' },
+  1463→    { id: 'pipeline', label: 'Pipeline' },
+  1464→  ]
+  1465→
+  1466→  return (
+  1467→    <div className="flex flex-col gap-3" role="region" aria-label="Verifier panel">
+  1468→      <div className="flex rounded-md border border-[#30363d] bg-[#0d1117]" role="tablist" aria-label="Verifier sub-tabs">
+  1469→        {subTabs.map((t) => (
+  1470→          <button
+  1471→            key={t.id}
+  1472→            type="button"
+  1473→            role="tab"
+  1474→            aria-selected={subTab === t.id}
+  1475→            onClick={() => setSubTab(t.id)}
+  1476→            className={cn(
+  1477→              'min-h-[40px] flex-1 rounded-md px-1 py-1.5 text-[10px] font-semibold transition-colors',
+  1478→              subTab === t.id
+  1479→                ? 'bg-[#161b22] text-[#58a6ff] shadow-[inset_0_-2px_0_0_#58a6ff]'
+  1480→                : 'text-[#8b949e] hover:text-[#c9d1d9]',
+  1481→            )}
+  1482→          >
+  1483→            {t.label}
+  1484→          </button>
+  1485→        ))}
+  1486→      </div>
+  1487→
+  1488→      {subTab === 'suite' ? <SuiteRunner /> : null}
+  1489→      {subTab === 'guard' ? (
+  1490→        <GuardrailsInspector sessionId={sessionId} onDone={onRefreshTelemetry} />
+  1491→      ) : null}
+  1492→      {subTab === 'browser' ? <BrowserConsole sessionId={sessionId} /> : null}
+  1493→      {subTab === 'runtime' ? (
+  1494→        <RuntimeVerifier
+  1495→          sessionId={sessionId}
+  1496→          stagedArtifacts={stagedArtifacts}
+  1497→          onReInflateCcr={onReInflateCcr}
+  1498→          onDone={onRefreshTelemetry}
+  1499→        />
+  1500→      ) : null}
+  1501→      {subTab === 'pipeline' ? (
+  1502→        <PipelineRunner sessionId={sessionId} envelope={envelope} onDone={onRefreshTelemetry} />
+  1503→      ) : null}
+  1504→    </div>
+  1505→  )
+  1506→}
+  1507→

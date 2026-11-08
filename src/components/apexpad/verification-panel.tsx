@@ -54,10 +54,18 @@ import {
   BTN_SECONDARY,
   INPUT_DARK,
   Panel,
+  TabStrip,
+  CopyButton,
   THIN_SCROLL,
   TinyLabel,
   TOAST_DARK,
 } from './ui-kit'
+
+/** Locale-correct stamps via Intl (never hardcoded formats). */
+const dateTimeFmt = new Intl.DateTimeFormat(undefined, {
+  dateStyle: 'medium',
+  timeStyle: 'medium',
+})
 
 /* ------------------------------------------------------------------ */
 /* §7.7 scenario fixtures (prefilled demo inputs)                      */
@@ -167,12 +175,12 @@ function GateBadge({
   return (
     <span
       className={cn(
-        'inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide',
+        'inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide',
         ok
-          ? 'border-[#3fb950]/40 bg-[#3fb950]/10 text-[#3fb950]'
+          ? 'border-signal-live/40 bg-signal-live/10 text-signal-live'
           : warn
-            ? 'border-[#d29922]/40 bg-[#d29922]/10 text-[#d29922]'
-            : 'border-[#f85149]/40 bg-[#f85149]/10 text-[#f85149]',
+            ? 'border-signal-gate/40 bg-signal-gate/10 text-signal-gate'
+            : 'border-signal-danger/40 bg-signal-danger/10 text-signal-danger',
       )}
     >
       {ok ? <Check className="h-3 w-3" /> : <AlertTriangle className="h-3 w-3" />}
@@ -192,19 +200,19 @@ function EvidenceList({
 }) {
   if (items.length === 0) {
     return emptyText ? (
-      <p className="text-[11px] italic text-[#8b949e]">{emptyText}</p>
+      <p className="text-[11px] italic text-ink-muted">{emptyText}</p>
     ) : null
   }
   const color =
     tone === 'red'
-      ? 'text-[#f85149]'
+      ? 'text-signal-danger'
       : tone === 'yellow'
-        ? 'text-[#d29922]'
+        ? 'text-signal-gate'
         : tone === 'green'
-          ? 'text-[#3fb950]'
-          : 'text-[#79c0ff]'
+          ? 'text-signal-live'
+          : 'text-signal-info'
   return (
-    <ul className={cn('space-y-1 font-mono text-[10px] leading-relaxed', color)}>
+    <ul className={cn('space-y-1 font-mono text-[11px] leading-relaxed', color)}>
       {items.map((item, i) => (
         <li key={i} className="whitespace-pre-wrap break-words">
           • {item}
@@ -216,7 +224,7 @@ function EvidenceList({
 
 function FieldLabel({ children, htmlFor }: { children: React.ReactNode; htmlFor?: string }) {
   return (
-    <label htmlFor={htmlFor} className="mb-1 block text-[10px] font-medium text-[#8b949e]">
+    <label htmlFor={htmlFor} className="mb-1 block text-[11px] font-medium text-ink-muted">
       {children}
     </label>
   )
@@ -351,7 +359,7 @@ function GuardrailsInspector({
               setAllowedDeletions('')
               setReport(null)
             }}
-            className="inline-flex items-center gap-1 rounded-md border border-[#30363d] bg-[#21262d] px-2 py-1 text-[10px] text-[#8b949e] hover:text-[#e6edf3]"
+            className="inline-flex items-center gap-1 rounded-md border border-wire bg-receipt px-2 py-1 text-[11px] text-ink-muted hover:text-ink-strong"
           >
             <RotateCcw className="h-3 w-3" /> §7.7 demo
           </button>
@@ -433,9 +441,9 @@ function GuardrailsInspector({
             <div>
               <TinyLabel className="mb-1">Truncation placeholders (recovered via AST splice)</TinyLabel>
               {report.truncationMatches.length === 0 ? (
-                <p className="text-[11px] italic text-[#8b949e]">None detected.</p>
+                <p className="text-[11px] italic text-ink-muted">None detected.</p>
               ) : (
-                <ul className="space-y-1 font-mono text-[10px] text-[#79c0ff]">
+                <ul className="space-y-1 font-mono text-[11px] text-signal-info">
                   {report.truncationMatches.map((m, i) => (
                     <li key={i}>
                       line {m.lineNumber}: “{m.rawLine.trim()}” → spliced {m.recoveredSymbolNames.join(', ') || '—'}
@@ -475,17 +483,11 @@ function GuardrailsInspector({
             <div>
               <div className="mb-1 flex items-center justify-between">
                 <TinyLabel>Healed content (downstream staging input)</TinyLabel>
-                <button
-                  type="button"
-                  onClick={() => void navigator.clipboard.writeText(report.healedContent)}
-                  className="rounded-md border border-[#30363d] bg-[#21262d] px-2 py-0.5 text-[10px] text-[#8b949e] hover:text-[#e6edf3]"
-                >
-                  Copy
-                </button>
+                <CopyButton text={report.healedContent} label="Copy" />
               </div>
               <pre
                 className={cn(
-                  'max-h-64 overflow-auto rounded-md border border-[#30363d] bg-[#0d1117] p-2 font-mono text-[10px] leading-relaxed text-[#c9d1d9]',
+                  'max-h-64 overflow-auto rounded-md border border-wire bg-vault p-2 font-mono text-[11px] leading-relaxed text-ink',
                   THIN_SCROLL,
                 )}
               >
@@ -622,7 +624,7 @@ function BrowserConsole({ sessionId }: { sessionId: string }) {
               setElementsJson(BROWSER_DEMO_ELEMENTS)
               setTargetRef('@e2')
             }}
-            className="inline-flex items-center gap-1 rounded-md border border-[#30363d] bg-[#21262d] px-2 py-1 text-[10px] text-[#8b949e] hover:text-[#e6edf3]"
+            className="inline-flex items-center gap-1 rounded-md border border-wire bg-receipt px-2 py-1 text-[11px] text-ink-muted hover:text-ink-strong"
           >
             <RotateCcw className="h-3 w-3" /> §7.7 demo
           </button>
@@ -655,7 +657,7 @@ function BrowserConsole({ sessionId }: { sessionId: string }) {
             Seed DOM state (revision++)
           </button>
           {state ? (
-            <p className="font-mono text-[10px] text-[#8b949e]">
+            <p className="font-mono text-[11px] text-ink-muted">
               live revision {state.livePageRevision} • active refs: {state.refIds.join(' ') || 'none'}
             </p>
           ) : null}
@@ -727,29 +729,29 @@ function BrowserConsole({ sessionId }: { sessionId: string }) {
                 key={`${entry.result.csprngBoundaryNonce}-${i}`}
                 className={cn(
                   'rounded-md border p-2',
-                  entry.result.success ? 'border-[#3fb950]/30 bg-[#3fb950]/5' : 'border-[#f85149]/30 bg-[#f85149]/5',
+                  entry.result.success ? 'border-signal-live/30 bg-signal-live/5' : 'border-signal-danger/30 bg-signal-danger/5',
                 )}
               >
-                <div className="mb-1 flex items-center gap-1.5 text-[10px] font-semibold">
+                <div className="mb-1 flex items-center gap-1.5 text-[11px] font-semibold">
                   {entry.result.success ? (
-                    <Check className="h-3 w-3 text-[#3fb950]" />
+                    <Check className="h-3 w-3 text-signal-live" />
                   ) : (
-                    <X className="h-3 w-3 text-[#f85149]" />
+                    <X className="h-3 w-3 text-signal-danger" />
                   )}
-                  <span className={entry.result.success ? 'text-[#3fb950]' : 'text-[#f85149]'}>
+                  <span className={entry.result.success ? 'text-signal-live' : 'text-signal-danger'}>
                     {entry.command.commandType}
                     {entry.command.targetRefOrUrl ? ` ${entry.command.targetRefOrUrl}` : ''}
                   </span>
-                  <span className="ml-auto font-mono text-[9px] text-[#8b949e]">
+                  <span className="ml-auto font-mono text-[11px] text-ink-muted">
                     {entry.result.executionLatencyMs}ms • nonce {entry.result.csprngBoundaryNonce.slice(0, 8)}…
                   </span>
                 </div>
                 {entry.result.loudFailureReason ? (
-                  <p className="mb-1 text-[10px] font-medium text-[#f85149]">{entry.result.loudFailureReason}</p>
+                  <p className="mb-1 text-[11px] font-medium text-signal-danger">{entry.result.loudFailureReason}</p>
                 ) : null}
                 <pre
                   className={cn(
-                    'max-h-32 overflow-auto whitespace-pre-wrap rounded border border-[#30363d] bg-[#0d1117] p-1.5 font-mono text-[9px] leading-relaxed text-[#8b949e]',
+                    'max-h-32 overflow-auto whitespace-pre-wrap rounded border border-wire bg-vault p-1.5 font-mono text-[11px] leading-relaxed text-ink-muted',
                     THIN_SCROLL,
                   )}
                 >
@@ -849,7 +851,7 @@ function RuntimeVerifier({
             </select>
           </div>
           {selected ? (
-            <p className="font-mono text-[10px] text-[#8b949e]">
+            <p className="font-mono text-[11px] text-ink-muted">
               required tests from blast radius: {selected.blastRadius.requiredTests.join(', ') || 'none'}
             </p>
           ) : null}
@@ -890,14 +892,14 @@ function RuntimeVerifier({
             </div>
             <div>
               <TinyLabel className="mb-1">Test gate (existence • syntax • imports • symbol binding)</TinyLabel>
-              <p className="font-mono text-[10px] text-[#8b949e]">
+              <p className="font-mono text-[11px] text-ink-muted">
                 executed: {report.executedTestFiles.join(', ') || 'none required by blast radius'}
               </p>
               {report.testRunnerOutputCcrId ? (
                 <button
                   type="button"
                   onClick={() => onReInflateCcr(report.testRunnerOutputCcrId as string)}
-                  className="mt-1 rounded-md border border-[#30363d] bg-[#21262d] px-2 py-0.5 text-[10px] text-[#79c0ff] hover:bg-[#30363d]"
+                  className="mt-1 rounded-md border border-wire bg-receipt px-2 py-0.5 text-[11px] text-signal-info hover:bg-wire"
                 >
                   Re-inflate gate log {report.testRunnerOutputCcrId}
                 </button>
@@ -908,13 +910,13 @@ function RuntimeVerifier({
                 <TinyLabel className="mb-1">Agent-browser loop ({report.agentBrowserResults.length} commands)</TinyLabel>
                 <ul className="space-y-1">
                   {report.agentBrowserResults.map((r, i) => (
-                    <li key={i} className="flex items-center gap-1.5 text-[10px]">
+                    <li key={i} className="flex items-center gap-1.5 text-[11px]">
                       {r.success ? (
-                        <Check className="h-3 w-3 shrink-0 text-[#3fb950]" />
+                        <Check className="h-3 w-3 shrink-0 text-signal-live" />
                       ) : (
-                        <X className="h-3 w-3 shrink-0 text-[#f85149]" />
+                        <X className="h-3 w-3 shrink-0 text-signal-danger" />
                       )}
-                      <span className="font-mono text-[#8b949e]">
+                      <span className="font-mono text-ink-muted">
                         {r.command.commandType}
                         {r.command.targetRefOrUrl ? ` ${r.command.targetRefOrUrl}` : ''}
                         {r.loudFailureReason ? ` — ${r.loudFailureReason}` : ''}
@@ -927,28 +929,28 @@ function RuntimeVerifier({
 
             {/* PHASE 10 (GAP #3): real subprocess + CDP telemetry */}
             {report.compilerTrace || report.testRunnerTrace || report.cdpProbe ? (
-              <div className="rounded-md border border-[#30363d] bg-[#0d1117] p-2">
+              <div className="rounded-md border border-wire bg-vault p-2">
                 <TinyLabel className="mb-1.5">
                   Phase 10 subprocess telemetry (real child_process + CDP)
                 </TinyLabel>
                 <div className="space-y-2">
                   {report.compilerTrace ? (
                     <div className="flex items-start gap-1.5">
-                      <TerminalSquare className="mt-0.5 h-3 w-3 shrink-0 text-[#79c0ff]" />
-                      <div className="min-w-0 font-mono text-[9px] leading-relaxed text-[#8b949e]">
+                      <TerminalSquare className="mt-0.5 h-3 w-3 shrink-0 text-signal-info" />
+                      <div className="min-w-0 font-mono text-[11px] leading-relaxed text-ink-muted">
                         <p className="break-all">
-                          compiler: <span className="text-[#79c0ff]">{report.compilerTrace.command}</span>
+                          compiler: <span className="text-signal-info">{report.compilerTrace.command}</span>
                         </p>
                         <p>
                           exitCode:{' '}
-                          <span className={report.compilerTrace.exitCode === 0 ? 'text-[#3fb950]' : 'text-[#f85149]'}>
+                          <span className={report.compilerTrace.exitCode === 0 ? 'text-signal-live' : 'text-signal-danger'}>
                             {report.compilerTrace.exitCode}
                           </span>{' '}
                           • {report.compilerTrace.durationMs}ms
                           {report.compilerTrace.ccrId ? ` • CCR ${report.compilerTrace.ccrId}` : ''}
                         </p>
                         {report.compilerTrace.stderrTail ? (
-                          <p className="whitespace-pre-wrap break-all text-[#d29922]">
+                          <p className="whitespace-pre-wrap break-all text-signal-gate">
                             {report.compilerTrace.stderrTail.slice(0, 300)}
                           </p>
                         ) : null}
@@ -957,14 +959,14 @@ function RuntimeVerifier({
                   ) : null}
                   {report.testRunnerTrace ? (
                     <div className="flex items-start gap-1.5">
-                      <TerminalSquare className="mt-0.5 h-3 w-3 shrink-0 text-[#7ee787]" />
-                      <div className="min-w-0 font-mono text-[9px] leading-relaxed text-[#8b949e]">
+                      <TerminalSquare className="mt-0.5 h-3 w-3 shrink-0 text-signal-live" />
+                      <div className="min-w-0 font-mono text-[11px] leading-relaxed text-ink-muted">
                         <p className="break-all">
-                          test runner: <span className="text-[#7ee787]">{report.testRunnerTrace.command}</span>
+                          test runner: <span className="text-signal-live">{report.testRunnerTrace.command}</span>
                         </p>
                         <p>
                           exitCode:{' '}
-                          <span className={report.testRunnerTrace.exitCode === 0 ? 'text-[#3fb950]' : 'text-[#f85149]'}>
+                          <span className={report.testRunnerTrace.exitCode === 0 ? 'text-signal-live' : 'text-signal-danger'}>
                             {report.testRunnerTrace.exitCode}
                           </span>{' '}
                           • {report.testRunnerTrace.durationMs}ms
@@ -976,17 +978,17 @@ function RuntimeVerifier({
                       </div>
                     </div>
                   ) : (
-                    <p className="font-mono text-[9px] text-[#8b949e]">
+                    <p className="font-mono text-[11px] text-ink-muted">
                       test runner: deterministic ripwire gate (no workspace-indexed test files to execute)
                     </p>
                   )}
                   {report.cdpProbe ? (
                     <div className="flex items-start gap-1.5">
-                      <Globe className="mt-0.5 h-3 w-3 shrink-0 text-[#d2a8ff]" />
-                      <div className="min-w-0 font-mono text-[9px] leading-relaxed text-[#8b949e]">
+                      <Globe className="mt-0.5 h-3 w-3 shrink-0 text-signal-memory" />
+                      <div className="min-w-0 font-mono text-[11px] leading-relaxed text-ink-muted">
                         <p>
-                          CDP probe: <span className="text-[#d2a8ff]">{report.cdpProbe.endpoint}</span> —{' '}
-                          <span className={report.cdpProbe.reachable ? 'text-[#3fb950]' : 'text-[#d29922]'}>
+                          CDP probe: <span className="text-signal-memory">{report.cdpProbe.endpoint}</span> —{' '}
+                          <span className={report.cdpProbe.reachable ? 'text-signal-live' : 'text-signal-gate'}>
                             {report.cdpProbe.reachable ? `reachable, ${report.cdpProbe.targetCount} target(s)` : 'unreachable (deterministic RefMap fallback)'}
                           </span>
                           {report.cdpProbe.error ? ` • ${report.cdpProbe.error}` : ''}
@@ -1122,7 +1124,7 @@ function PipelineRunner({
               ])
               setResult(null)
             }}
-            className="inline-flex items-center gap-1 rounded-md border border-[#30363d] bg-[#21262d] px-2 py-1 text-[10px] text-[#8b949e] hover:text-[#e6edf3]"
+            className="inline-flex items-center gap-1 rounded-md border border-wire bg-receipt px-2 py-1 text-[11px] text-ink-muted hover:text-ink-strong"
           >
             <RotateCcw className="h-3 w-3" /> Demo
           </button>
@@ -1141,19 +1143,20 @@ function PipelineRunner({
               min={1000}
               max={100000}
               value={budget}
+              name="apexpad-pipeline-budget"
               onChange={(e) => setBudget(Number(e.target.value) || 12000)}
-              className={cn(INPUT_DARK, 'w-full rounded-md border px-2 py-1.5')}
+              className={cn(INPUT_DARK, 'w-full rounded-md border px-2 py-1.5 tabular-nums')}
             />
           </div>
           {/* PHASE 10 (GAP #2): strict pre-staging quarantine gate toggle */}
-          <label className="flex cursor-pointer items-center gap-2 rounded-md border border-[#30363d] bg-[#0d1117] px-2 py-2">
+          <label className="flex cursor-pointer items-center gap-2 rounded-md border border-wire bg-vault px-2 py-2">
             <input
               type="checkbox"
               checked={strictQuarantine}
               onChange={(e) => setStrictQuarantine(e.target.checked)}
-              className="h-3.5 w-3.5 accent-[#f85149]"
+              className="h-3.5 w-3.5 accent-signal-danger"
             />
-            <span className="font-mono text-[10px] text-[#c9d1d9]">
+            <span className="font-mono text-[11px] text-ink">
               Strict quarantine gate — failing edits are hard-blocked before staging
             </span>
           </label>
@@ -1175,21 +1178,21 @@ function PipelineRunner({
       <SectionCard title={`Candidate edits (${edits.length})`}>
         <div className="space-y-3">
           {edits.map((edit, idx) => (
-            <div key={idx} className="rounded-md border border-[#30363d] bg-[#0d1117] p-2">
+            <div key={idx} className="rounded-md border border-wire bg-vault p-2">
               <div className="mb-1.5 flex items-center gap-2">
-                <span className="font-mono text-[10px] text-[#79c0ff]">edit #{idx + 1}</span>
+                <span className="font-mono text-[11px] text-signal-info">edit #{idx + 1}</span>
                 <input
                   value={edit.targetFilePath}
                   onChange={(e) => updateEdit(idx, { targetFilePath: e.target.value })}
                   aria-label={`Edit ${idx + 1} target file path`}
-                  className={cn(INPUT_DARK, 'flex-1 rounded border px-2 py-1 text-[10px]')}
+                  className={cn(INPUT_DARK, 'flex-1 rounded border px-2 py-1 text-[11px]')}
                 />
                 {edits.length > 1 ? (
                   <button
                     type="button"
                     aria-label={`Remove edit ${idx + 1}`}
                     onClick={() => setEdits((prev) => prev.filter((_, i) => i !== idx))}
-                    className="rounded p-1 text-[#8b949e] hover:text-[#f85149]"
+                    className="rounded p-1 text-ink-muted hover:text-signal-danger"
                   >
                     <Trash2 className="h-3.5 w-3.5" />
                   </button>
@@ -1236,23 +1239,23 @@ function PipelineRunner({
                 {result.quarantinedEdits.map((q) => (
                   <div
                     key={q.quarantineId}
-                    className="rounded-md border border-[#f85149]/50 bg-[#f85149]/5 p-2"
+                    className="rounded-md border border-signal-danger/50 bg-signal-danger/5 p-2"
                   >
                     <div className="mb-1 flex items-center gap-1.5">
-                      <AlertTriangle className="h-3.5 w-3.5 text-[#f85149]" />
-                      <span className="break-all font-mono text-[10px] font-bold text-[#f85149]">
+                      <AlertTriangle className="h-3.5 w-3.5 text-signal-danger" />
+                      <span className="break-all font-mono text-[11px] font-bold text-signal-danger">
                         {q.targetFilePath}
                       </span>
                     </div>
                     <ul className="space-y-0.5">
                       {q.blockingReasons.map((reason, i) => (
-                        <li key={i} className="font-mono text-[9px] leading-relaxed text-[#f85149]/90">
+                        <li key={i} className="font-mono text-[11px] leading-relaxed text-signal-danger/90">
                           ⚠ {reason}
                         </li>
                       ))}
                     </ul>
-                    <p className="mt-1 font-mono text-[9px] text-[#8b949e]">
-                      quarantined {new Date(q.quarantinedAt).toLocaleString()} — persisted to
+                    <p className="mt-1 font-mono text-[11px] text-ink-muted">
+                      quarantined {dateTimeFmt.format(new Date(q.quarantinedAt))} — persisted to
                       quarantined_edits; NEVER staged.
                     </p>
                   </div>
@@ -1262,9 +1265,9 @@ function PipelineRunner({
           ) : null}
 
           <SectionCard title="Stage 1 — Specification Contract (Task 2)">
-            <div className="space-y-1 font-mono text-[10px] text-[#8b949e]">
+            <div className="space-y-1 font-mono text-[11px] text-ink-muted">
               <p>
-                <span className="text-[#79c0ff]">{result.specContract.specId}</span> • split:{' '}
+                <span className="text-signal-info">{result.specContract.specId}</span> • split:{' '}
                 {String(result.specContract.isOverloadedPromptSplit)} • complexity:{' '}
                 {result.specContract.estimatedReasoningComplexity} • subtasks:{' '}
                 {result.specContract.subtaskDag.length}
@@ -1280,9 +1283,9 @@ function PipelineRunner({
           <SectionCard title="Stage 2 — Guardrails (Task 3)">
             <div className="space-y-2">
               {result.guardrailReports.map((g) => (
-                <div key={g.guardId} className="rounded-md border border-[#30363d] p-2">
+                <div key={g.guardId} className="rounded-md border border-wire p-2">
                   <div className="mb-1 flex flex-wrap items-center gap-1.5">
-                    <span className="font-mono text-[10px] text-[#79c0ff]">{g.targetFilePath}</span>
+                    <span className="font-mono text-[11px] text-signal-info">{g.targetFilePath}</span>
                     <GateBadge ok={g.passedAllGates} label={g.passedAllGates ? 'pass' : 'fail'} />
                     {g.wasAutoHealed ? <GateBadge ok label={`healed (+${g.missingSymbolsRecovered.length})`} warn /> : null}
                   </div>
@@ -1294,12 +1297,12 @@ function PipelineRunner({
           </SectionCard>
 
           <SectionCard title="Stage 3 — DAG Staging (Task 1)">
-            <div className="space-y-1 font-mono text-[10px] text-[#8b949e]">
+            <div className="space-y-1 font-mono text-[11px] text-ink-muted">
               <p>
-                <span className="text-[#79c0ff]">{result.dagState.runId}</span> • status:{' '}
+                <span className="text-signal-info">{result.dagState.runId}</span> • status:{' '}
                 <span
                   className={
-                    result.dagState.status === 'halted_on_violation' ? 'text-[#f85149]' : 'text-[#3fb950]'
+                    result.dagState.status === 'halted_on_violation' ? 'text-signal-danger' : 'text-signal-live'
                   }
                 >
                   {result.dagState.status}
@@ -1313,9 +1316,9 @@ function PipelineRunner({
           <SectionCard title="Stage 4 — Runtime Verification (Task 4)">
             <div className="space-y-2">
               {result.verificationReports.map((v) => (
-                <div key={v.verificationId} className="rounded-md border border-[#30363d] p-2">
+                <div key={v.verificationId} className="rounded-md border border-wire p-2">
                   <div className="mb-1 flex flex-wrap items-center gap-1.5">
-                    <span className="font-mono text-[10px] text-[#79c0ff]">{v.targetFilePath}</span>
+                    <span className="font-mono text-[11px] text-signal-info">{v.targetFilePath}</span>
                     <GateBadge
                       ok={v.overallStatus === 'verified_ready_for_approval'}
                       label={v.overallStatus === 'verified_ready_for_approval' ? 'verified' : 'failed'}
@@ -1370,9 +1373,9 @@ function SuiteRunner() {
   return (
     <div className="flex flex-col gap-3">
       <SectionCard title="§7.7 — End-to-End Verification Suite (Tasks 2, 3, 4)">
-        <p className="mb-3 text-[11px] leading-relaxed text-[#8b949e]">
+        <p className="mb-3 text-[11px] leading-relaxed text-ink-muted">
           Executes the blueprint’s three behavioral invariants live against the engine, inside the
-          isolated <span className="font-mono text-[#79c0ff]">apexpad-tasks-234-test</span> project:
+          isolated <span className="font-mono text-signal-info">apexpad-tasks-234-test</span> project:
           overloaded prompt decomposition + DNA injection, anti-truncation splicing + hallucinated
           import blocking + premise critique, and the Agent-Browser @e1 RefMap loop with loud
           failures and CSPRNG boundaries.
@@ -1393,8 +1396,8 @@ function SuiteRunner() {
 
       {run ? (
         <>
-          <div className="flex items-center justify-between rounded-md border border-[#30363d] bg-[#0d1117] px-3 py-2">
-            <span className="font-mono text-[10px] text-[#8b949e]">
+          <div className="flex items-center justify-between rounded-md border border-wire bg-vault px-3 py-2">
+            <span className="font-mono text-[11px] text-ink-muted">
               run {run.runId} • {run.durationMs}ms
             </span>
             <GateBadge ok={run.allPassed} label={run.allPassed ? 'all scenarios green' : 'failures present'} />
@@ -1402,27 +1405,27 @@ function SuiteRunner() {
           {run.scenarios.map((scenario) => (
             <SectionCard key={scenario.scenarioId} title={scenario.scenarioId}>
               <div className="mb-2 flex items-center justify-between gap-2">
-                <p className="text-[11px] font-medium text-[#c9d1d9]">{scenario.title}</p>
+                <p className="text-[11px] font-medium text-ink">{scenario.title}</p>
                 <GateBadge ok={scenario.passed} label={scenario.passed ? 'pass' : 'fail'} />
               </div>
               <ul className="space-y-1.5">
                 {scenario.assertions.map((a, i) => (
                   <li key={i} className="flex items-start gap-1.5">
                     {a.passed ? (
-                      <Check className="mt-0.5 h-3 w-3 shrink-0 text-[#3fb950]" />
+                      <Check className="mt-0.5 h-3 w-3 shrink-0 text-signal-live" />
                     ) : (
-                      <X className="mt-0.5 h-3 w-3 shrink-0 text-[#f85149]" />
+                      <X className="mt-0.5 h-3 w-3 shrink-0 text-signal-danger" />
                     )}
                     <div className="min-w-0">
-                      <p className="text-[11px] text-[#c9d1d9]">{a.name}</p>
-                      <p className="break-words font-mono text-[9px] leading-relaxed text-[#8b949e]">
+                      <p className="text-[11px] text-ink">{a.name}</p>
+                      <p className="break-words font-mono text-[11px] leading-relaxed text-ink-muted">
                         {a.evidence}
                       </p>
                     </div>
                   </li>
                 ))}
               </ul>
-              <p className="mt-2 font-mono text-[9px] text-[#8b949e]">
+              <p className="mt-2 font-mono text-[11px] text-ink-muted">
                 {scenario.assertions.filter((a) => a.passed).length}/{scenario.assertions.length} assertions •{' '}
                 {scenario.durationMs}ms
               </p>
@@ -1465,25 +1468,20 @@ export function VerificationPanel({
 
   return (
     <div className="flex flex-col gap-3" role="region" aria-label="Verifier panel">
-      <div className="flex rounded-md border border-[#30363d] bg-[#0d1117]" role="tablist" aria-label="Verifier sub-tabs">
-        {subTabs.map((t) => (
-          <button
-            key={t.id}
-            type="button"
-            role="tab"
-            aria-selected={subTab === t.id}
-            onClick={() => setSubTab(t.id)}
-            className={cn(
-              'min-h-[40px] flex-1 rounded-md px-1 py-1.5 text-[10px] font-semibold transition-colors',
-              subTab === t.id
-                ? 'bg-[#161b22] text-[#58a6ff] shadow-[inset_0_-2px_0_0_#58a6ff]'
-                : 'text-[#8b949e] hover:text-[#c9d1d9]',
-            )}
-          >
-            {t.label}
-          </button>
-        ))}
-      </div>
+      <TabStrip
+        idPrefix="verifier"
+        ariaLabel="Verifier sub-tabs"
+        items={subTabs.map((t) => ({ id: t.id, label: t.label }))}
+        active={subTab}
+        onChange={(id) => setSubTab(id as typeof subTab)}
+        className="rounded-md border border-wire bg-vault p-1 [&>button]:flex-1 [&>button]:rounded-md [&>button]:border-b-0"
+      />
+      <div
+        role="tabpanel"
+        id={`verifier-panel-${subTab}`}
+        aria-labelledby={`verifier-tab-${subTab}`}
+        className="flex flex-col gap-3"
+      >
 
       {subTab === 'suite' ? <SuiteRunner /> : null}
       {subTab === 'guard' ? (
@@ -1501,6 +1499,7 @@ export function VerificationPanel({
       {subTab === 'pipeline' ? (
         <PipelineRunner sessionId={sessionId} envelope={envelope} onDone={onRefreshTelemetry} />
       ) : null}
+      </div>
     </div>
   )
 }
