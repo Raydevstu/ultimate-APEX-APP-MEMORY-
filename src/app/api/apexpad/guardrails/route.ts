@@ -34,6 +34,9 @@ export async function POST(req: NextRequest) {
       previousContent,
       proposedContent,
       userPrompt,
+      allowedSymbolDeletions: Array.isArray(body.allowedSymbolDeletions)
+        ? body.allowedSymbolDeletions.map(String)
+        : undefined,
     });
     const telemetry = await engine.modelAdapter.getDashboardTelemetry(PROJECT_SLUG);
 

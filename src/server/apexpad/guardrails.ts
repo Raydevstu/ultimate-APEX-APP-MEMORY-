@@ -157,7 +157,6 @@ export function resolveImportProblems(params: {
       continuityRoots.add(rootPackageName(spec));
     }
   }
-
   const problems: ImportResolutionProblem[] = [];
   const packageNames = getWorkspacePackageNames();
 
@@ -180,10 +179,14 @@ export function resolveImportProblems(params: {
     if (NODE_BUILTIN_MODULES.has(rootPackageName(spec))) continue;
 
     if (spec.startsWith('./') || spec.startsWith('../') || spec.startsWith('@/') || spec.startsWith('~/')) {
+      // Continuity: if the previous version of this file already imported this
+      // specifier, the previous version compiled — do not re-flag it (only
+      // NEW relative/alias specifiers are hallucination-checked).
+      if (continuitySpecifiers.has(spec)) continue;
       if (!resolveRelative(spec)) {
         problems.push({
           specifier: spec,
-          reason: `unresolvable workspace import "${spec}" — no indexed file matches this relative/alias path`,
+          reason: `unresolvable workspace import "${spec}" — no indexed file matches this relative/alias path and it was not present in the previous version of this file`,
         });
       }
       continue;
@@ -313,6 +316,106 @@ function symbolIsPresent(content: string, symbolName: string): boolean {
   return re.test(content);
 }
 
+/** A named method declared inside a class body (blueprint §7.4 Gate 1 recovers these too). */
+export interface ClassMethodSymbol {
+  className: string;
+  methodName: string;
+  fullText: string;
+}
+
+/**
+ * Extracts every named class method with its exact source text (real TS AST).
+ * The blueprint prose is explicit: "If the LLM silently dropped an existing
+ * function/method that was not supposed to be deleted, the patcher extracts
+ * the exact symbol block from previousContent and splices it back in."
+ */
+export function extractClassMethods(content: string, filePath: string): ClassMethodSymbol[] {
+  const source = ts.createSourceFile(
+    filePath,
+    content,
+    ts.ScriptTarget.Latest,
+    true,
+    scriptKindFor(filePath)
+  );
+  const methods: ClassMethodSymbol[] = [];
+  for (const statement of source.statements) {
+    if (!ts.isClassDeclaration(statement) || !statement.name) continue;
+    for (const member of statement.members) {
+      if (
+        (ts.isMethodDeclaration(member) || ts.isGetAccessorDeclaration(member) || ts.isSetAccessorDeclaration(member)) &&
+        member.name &&
+        ts.isIdentifier(member.name)
+      ) {
+        methods.push({
+          className: statement.name.text,
+          methodName: member.name.text,
+          // getStart() skips leading trivia, so the text starts at the method
+          // keyword — re-indentation is unnecessary when splicing into the same
+          // file version lineage (both versions share the member indentation).
+          fullText: source.text.slice(member.getStart(source), member.getEnd()),
+        });
+      }
+    }
+  }
+  return methods;
+}
+
+/**
+ * Splices missing method blocks back into their class body (before the class
+ * closing brace) inside `healed`. Classes are processed in descending source
+ * order so earlier insertions do not shift later positions.
+ */
+function spliceMissingMethodsIntoClasses(
+  healed: string,
+  filePath: string,
+  missingByClass: Map<string, ClassMethodSymbol[]>
+): string {
+  if (missingByClass.size === 0) return healed;
+
+  const source = ts.createSourceFile(
+    filePath,
+    healed,
+    ts.ScriptTarget.Latest,
+    true,
+    scriptKindFor(filePath)
+  );
+
+  // Collect insertion points (position of each class closing brace) and the
+  // class-body indentation so recovered members match the surviving style.
+  const insertions: { bracePos: number; methods: string }[] = [];
+  for (const statement of source.statements) {
+    if (!ts.isClassDeclaration(statement) || !statement.name) continue;
+    const className = statement.name.text;
+    const missing = missingByClass.get(className);
+    if (!missing || missing.length === 0) continue;
+    const bodyIndent = (() => {
+      if (statement.members.length > 0) {
+        const { character } = source.getLineAndCharacterOfPosition(
+          statement.members[0].getStart(source)
+        );
+        return ' '.repeat(character);
+      }
+      return '  ';
+    })();
+    insertions.push({
+      bracePos: statement.getEnd() - 1, // position of the class closing brace
+      methods: missing
+        .map((m) => m.fullText)
+        .map((text) => bodyIndent + text) // first line carries no leading trivia
+        .join('\n\n'),
+    });
+  }
+
+  let result = healed;
+  insertions.sort((a, b) => b.bracePos - a.bracePos);
+  for (const ins of insertions) {
+    const before = result.slice(0, ins.bracePos).replace(/[ \t]*\n+$/, '\n');
+    const after = result.slice(ins.bracePos);
+    result = `${before}\n${ins.methods}\n${after}`;
+  }
+  return result;
+}
+
 /* ------------------------------------------------------------------ */
 /* Gate 1: truncation placeholder detection                            */
 /* ------------------------------------------------------------------ */
@@ -346,6 +449,8 @@ interface VersionSkewRule {
   warning: string;
   /** Only apply when the raw line matches this precondition. */
   wholeFile?: RegExp;
+  /** Only apply to files whose path matches this precondition. */
+  appliesToPath?: (filePath: string) => boolean;
 }
 
 const VERSION_SKEW_RULES: VersionSkewRule[] = [
@@ -400,12 +505,41 @@ const VERSION_SKEW_RULES: VersionSkewRule[] = [
       'Jest globals mixed into a Vitest test module — use vitest imports (describe/it/expect/vi) consistently.',
     wholeFile: /(?:^|\n)\s*import\s+\{[^}]*\}\s+from\s+['"]vitest['"]/,
   },
+  {
+    // Blueprint §7.4 detector 1: Pages Router APIs inside an App Router module.
+    id: 'pages_router_in_app_dir',
+    regex:
+      /\b(?:getServerSideProps|getStaticProps)\b|\buseRouter\s*,?[^\n]*from\s*['"]next\/router['"]|from\s*['"]next\/router['"]/,
+    warning:
+      'Version Skew: Next.js Pages Router API (getServerSideProps / getStaticProps / next/router) used inside an App Router module — use next/navigation and RSC semantics instead.',
+    appliesToPath: (filePath) => {
+      const normalized = filePath.replace(/\\/g, '/');
+      return /(?:^|\/)app(?:\/|$)/.test(normalized) && /\.(ts|tsx|js|jsx|mts|mjs)$/i.test(normalized);
+    },
+  },
+  {
+    // Blueprint §7.4 detector 2: legacy React 17 entry point.
+    id: 'react17_legacy_render',
+    regex: /\bReactDOM\.render\s*\(/,
+    warning:
+      'Version Skew: Legacy React 17 ReactDOM.render() detected; use React 18 createRoot() from react-dom/client.',
+  },
+  {
+    // Blueprint §7.4 detector 3: mixed Pydantic v1 + v2 decorators (Python).
+    id: 'pydantic_v1_v2_mixed',
+    regex: /@validator\b/,
+    warning:
+      'Version Skew: Mixed Pydantic v1 (@validator) and Pydantic v2 (@field_validator) decorators in the same file — migrate everything to v2 @field_validator.',
+    wholeFile: /@field_validator\b/,
+    appliesToPath: (filePath) => filePath.replace(/\\/g, '/').toLowerCase().endsWith('.py'),
+  },
 ];
 
-function scanVersionSkew(proposedContent: string): string[] {
+function scanVersionSkew(targetFilePath: string, proposedContent: string): string[] {
   const lines = proposedContent.split('\n');
   const warnings: string[] = [];
   for (const rule of VERSION_SKEW_RULES) {
+    if (rule.appliesToPath && !rule.appliesToPath(targetFilePath)) continue;
     if (rule.wholeFile && !rule.wholeFile.test(proposedContent)) continue;
     for (let i = 0; i < lines.length; i++) {
       if (rule.regex.test(lines[i])) {
@@ -467,6 +601,9 @@ export class ModelGenerationGuardrails {
    * Runs all four Task 3 gates over a candidate edit and persists the report.
    * The returned `healedContent` is what downstream stages (DAG staging) MUST
    * consume — never the raw proposed content (blueprint §7.6 STAGE 2).
+   *
+   * `allowedSymbolDeletions` lists symbols the user explicitly approved for
+   * deletion; the anti-truncation healer will NOT splice those back in.
    */
   public async inspectAndHealCandidateCode(params: {
     sessionId: string;
@@ -475,7 +612,9 @@ export class ModelGenerationGuardrails {
     previousContent: string;
     proposedContent: string;
     userPrompt: string;
+    allowedSymbolDeletions?: string[];
   }): Promise<GuardrailInspectionReport> {
+    const allowedDeletions = new Set(params.allowedSymbolDeletions ?? []);
     const startedAt = Date.now();
     const guardId = `guard_${crypto.randomBytes(6).toString('hex')}`;
     const createdAt = new Date().toISOString();
@@ -494,7 +633,8 @@ export class ModelGenerationGuardrails {
     if (placeholderLines.length > 0) {
       const previousSymbols = extractTopLevelSymbols(params.previousContent, params.targetFilePath);
       const missing = previousSymbols.filter(
-        (sym) => !symbolIsPresent(params.proposedContent, sym.name)
+        (sym) =>
+          !symbolIsPresent(params.proposedContent, sym.name) && !allowedDeletions.has(sym.name)
       );
 
       // Splice every missing symbol at the FIRST placeholder position and drop
@@ -508,7 +648,10 @@ export class ModelGenerationGuardrails {
             if (rebuiltLines.length > 0 && rebuiltLines[rebuiltLines.length - 1].trim() !== '') {
               rebuiltLines.push('');
             }
-            rebuiltLines.push(spliceBlock);
+            if (spliceBlock) {
+              rebuiltLines.push(spliceBlock);
+              missingSymbolsRecovered.push(...missing.map((sym) => sym.name));
+            }
             insertionDone = true;
           }
           continue; // placeholder removed
@@ -518,7 +661,6 @@ export class ModelGenerationGuardrails {
 
       healedContent = rebuiltLines.join('\n');
       wasAutoHealed = true;
-      missingSymbolsRecovered.push(...missing.map((sym) => sym.name));
 
       for (const placeholder of placeholderLines) {
         truncationMatches.push({
@@ -526,6 +668,55 @@ export class ModelGenerationGuardrails {
           rawLine: placeholder.rawLine,
           recoveredSymbolNames: missing.map((sym) => sym.name),
         });
+      }
+    }
+
+    /* -- Gate 1b: silently dropped CLASS METHODS (blueprint §7.4 prose) ---- */
+    // A class header surviving the edit does not mean its members survived.
+    // Compare the method table of previousContent against healedContent and
+    // splice dropped methods back into their class body before the closing
+    // brace — whether or not the LLM left a lazy placeholder marker.
+    {
+      const prevMethods = extractClassMethods(params.previousContent, params.targetFilePath);
+      const healedMethods = extractClassMethods(healedContent, params.targetFilePath);
+      const healedMethodKeys = new Set(healedMethods.map((m) => `${m.className}.${m.methodName}`));
+      const healedClassNames = new Set(healedMethods.map((m) => m.className));
+      const missingMethods = prevMethods.filter(
+        (m) =>
+          healedClassNames.has(m.className) && // class still exists (otherwise the top-level splice restored it wholesale)
+          !healedMethodKeys.has(`${m.className}.${m.methodName}`) &&
+          !allowedDeletions.has(m.methodName) &&
+          !allowedDeletions.has(`${m.className}.${m.methodName}`)
+      );
+      if (missingMethods.length > 0) {
+        const missingByClass = new Map<string, ClassMethodSymbol[]>();
+        for (const method of missingMethods) {
+          const bucket = missingByClass.get(method.className);
+          if (bucket) bucket.push(method);
+          else missingByClass.set(method.className, [method]);
+        }
+        healedContent = spliceMissingMethodsIntoClasses(
+          healedContent,
+          params.targetFilePath,
+          missingByClass
+        );
+        wasAutoHealed = true;
+        missingSymbolsRecovered.push(...missingMethods.map((m) => m.methodName));
+        // Attribute the recovered methods to the truncation marker that
+        // triggered the healing (or to the silent-drop path when no marker).
+        if (truncationMatches.length > 0) {
+          for (const match of truncationMatches) {
+            match.recoveredSymbolNames = Array.from(
+              new Set([...match.recoveredSymbolNames, ...missingMethods.map((m) => m.methodName)])
+            );
+          }
+        } else {
+          truncationMatches.push({
+            lineNumber: 0,
+            rawLine: '(silent symbol drop — no placeholder marker left by the model)',
+            recoveredSymbolNames: missingMethods.map((m) => m.methodName),
+          });
+        }
       }
     }
 
@@ -540,8 +731,8 @@ export class ModelGenerationGuardrails {
       (p) => `${p.specifier} — ${p.reason}`
     );
 
-    /* -- Gate 3: Version-Skew Scanner -------------------------------------- */
-    const versionSkewWarnings = scanVersionSkew(healedContent);
+    /* -- Gate 3: Version-Skew Scanner (file-path aware) --------------------- */
+    const versionSkewWarnings = scanVersionSkew(params.targetFilePath, healedContent);
 
     /* -- Gate 4: Anti-Sycophancy Premise Critic ----------------------------- */
     const sycophancyWarnings = await this.critiqueUserPremises(
@@ -555,7 +746,12 @@ export class ModelGenerationGuardrails {
     const placeholderRemaining = healedContent
       .split('\n')
       .some((line) => isTruncationPlaceholderLine(line));
-    const passedAllGates = hallucinatedImports.length === 0 && !placeholderRemaining;
+    // Blueprint §7.4 formula: placeholders, hallucinated imports AND version
+    // skew must all be clean for the candidate to pass.
+    const passedAllGates =
+      hallucinatedImports.length === 0 &&
+      !placeholderRemaining &&
+      versionSkewWarnings.length === 0;
 
     const report: GuardrailInspectionReport = {
       guardId,
@@ -647,9 +843,10 @@ export class ModelGenerationGuardrails {
 
   /**
    * Critic: every substantial identifier the user asserts in their prompt is
-   * checked against the previous content, the healed content, the indexed AST
-   * symbols and the workspace store. Unknown identifiers produce explicit
-   * sycophancy warnings instead of being silently accepted.
+   * checked against the PRE-EDIT reality — the previous file content, the
+   * indexed AST symbols (call graph) and the workspace store. The healed
+   * candidate is deliberately NOT consulted: a hallucinated import inside the
+   * candidate must never validate the user's premise (blueprint §7.4 critic 4).
    */
   private async critiqueUserPremises(
     userPrompt: string,
@@ -658,8 +855,7 @@ export class ModelGenerationGuardrails {
     healedContent: string,
     projectSlug: string
   ): Promise<string[]> {
-    const tokens = extractPremiseTokens(userPrompt);
-    if (tokens.length === 0) return [];
+    const warnings: string[] = [];
 
     const indexedSymbols = await db.astSymbol.findMany({
       where: { projectSlug },
@@ -671,22 +867,65 @@ export class ModelGenerationGuardrails {
     for (const [, content] of getWorkspaceFileStore().entries()) {
       workspaceTexts.push(content);
     }
+    const premiseKnownEverywhere = (entity: string): boolean =>
+      symbolIsPresent(previousContent, entity) ||
+      indexedNames.has(entity) ||
+      workspaceTexts.some((text) => text.includes(entity));
 
-    const warnings: string[] = [];
-    for (const token of tokens) {
-      const inPrevious = symbolIsPresent(previousContent, token);
-      const inHealed = symbolIsPresent(healedContent, token);
-      const inIndex = indexedNames.has(token);
-      const inWorkspace = workspaceTexts.some((text) => text.includes(token));
-      if (!inPrevious && !inHealed && !inIndex && !inWorkspace) {
-        warnings.push(
-          `Anti-sycophancy: the user premise references "${token}", which does not appear in ` +
-            `${targetFilePath}, the healed candidate, the indexed AST symbols, or the workspace. ` +
-            `Verify the hypothesis against real evidence instead of accepting it.`
-        );
-        if (warnings.length >= 5) break;
+    /* -- Blueprint leading/speculative-question detection ------------------- */
+    // "Is it crashing because of X?" / "maybe the bug is in X" etc.
+    const LEADING_QUESTION_RE =
+      /\b(?:is\s+it\s+(?:crashing|failing|breaking)\s+because\s+of|is\s+it\s+because\s+of|is\s+it\s+because|could\s+it\s+be\s+(?:that|because\s+of)|maybe\s+the\s+bug\s+is\s+in|i\s+think\s+it'?s\s+crashing\s+due\s+to)\s+([A-Za-z0-9_.-]+)/i;
+    const leading = LEADING_QUESTION_RE.exec(userPrompt);
+    if (leading) {
+      const suspectedEntity = leading[1].replace(/[.,;:!?)]+$/, '');
+      const isIdentifierLike = /^[A-Za-z_][A-Za-z0-9_.-]{2,}$/.test(suspectedEntity);
+      if (isIdentifierLike && !SYCOPHANCY_STOPWORDS.has(suspectedEntity.toLowerCase())) {
+        const known = premiseKnownEverywhere(suspectedEntity);
+        // "known" means it exists somewhere verifiable; if it only exists
+        // inside the candidate's own additions it is still hallucinated, and
+        // premiseKnownEverywhere already ignores healedContent.
+        if (!known) {
+          warnings.push(
+            `Anti-Sycophancy Alert: User hypothesized "${suspectedEntity}" as the cause, but ` +
+              `"${suspectedEntity}" does not appear in the original file, the indexed call graph, ` +
+              `or the workspace. Verify the root cause against real evidence before accepting this edit.`
+          );
+        }
       }
     }
+
+    /* -- Broad premise-token scan (covers non-question phrasings) ----------- */
+    // Blueprint scope: the critic guards against speculative/assertive FALSE
+    // premises. Constructive feature requests ("Add a fetchAccountPlan
+    // helper") legitimately name symbols that do not exist yet, so the token
+    // scan only runs when the prompt carries premise/debugging markers.
+    const PREMISE_MARKER_RE =
+      /\b(because|due\s+to|crash\w*|bug|error|broken|breaking|fail\w*|wrong|issue|problem|not\s+working|doesn'?t\s+work|is\s+it\s+supposed)\b/i;
+    if (PREMISE_MARKER_RE.test(userPrompt)) {
+      const tokens = extractPremiseTokens(userPrompt);
+      for (const token of tokens) {
+        if (!premiseKnownEverywhere(token)) {
+          warnings.push(
+            `Anti-sycophancy: the user premise references "${token}", which does not appear in ` +
+              `${targetFilePath}, the indexed AST symbols, or the workspace. ` +
+              `Verify the hypothesis against real evidence instead of accepting it.`
+          );
+          if (warnings.length >= 5) break;
+        }
+      }
+    }
+
+    /* -- Blueprint "Whack-a-Mole" error-suppression regression check -------- */
+    const prevThrows = (previousContent.match(/\bthrow\s+new\s+\w+/g) || []).length;
+    const nextThrows = (healedContent.match(/\bthrow\s+new\s+\w+/g) || []).length;
+    if (prevThrows > 0 && nextThrows === 0) {
+      warnings.push(
+        `Regression Alert: Proposed edit removes all ${prevThrows} explicit error throw guard(s) ` +
+          `from the file ("Whack-a-Mole" error suppression detected).`
+      );
+    }
+
     return warnings;
   }
 }

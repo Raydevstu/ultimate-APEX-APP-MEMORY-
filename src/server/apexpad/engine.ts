@@ -37,7 +37,7 @@ export interface ApexEngine {
  * Bumped whenever the ApexEngine shape changes so a dev-server hot reload
  * discards stale singletons from previous module versions.
  */
-const ENGINE_VERSION = 9;
+const ENGINE_VERSION = 13;
 
 const globalForEngine = globalThis as unknown as {
   apexpadEngine: ApexEngine | undefined;

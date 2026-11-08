@@ -286,6 +286,7 @@ function GuardrailsInspector({
   const [previousContent, setPreviousContent] = React.useState(GUARD_DEMO_PREVIOUS)
   const [proposedContent, setProposedContent] = React.useState(GUARD_DEMO_PROPOSED)
   const [userPrompt, setUserPrompt] = React.useState(GUARD_DEMO_PROMPT)
+  const [allowedDeletions, setAllowedDeletions] = React.useState('')
   const [running, setRunning] = React.useState(false)
   const [report, setReport] = React.useState<GuardrailInspectionReport | null>(null)
 
@@ -308,6 +309,10 @@ function GuardrailsInspector({
         previousContent,
         proposedContent,
         userPrompt,
+        allowedSymbolDeletions: allowedDeletions
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean),
       })
       setReport(res.report)
       onDone()
@@ -341,6 +346,7 @@ function GuardrailsInspector({
               setPreviousContent(GUARD_DEMO_PREVIOUS)
               setProposedContent(GUARD_DEMO_PROPOSED)
               setUserPrompt(GUARD_DEMO_PROMPT)
+              setAllowedDeletions('')
               setReport(null)
             }}
             className="inline-flex items-center gap-1 rounded-md border border-[#30363d] bg-[#21262d] px-2 py-1 text-[10px] text-[#8b949e] hover:text-[#e6edf3]"
@@ -385,6 +391,18 @@ function GuardrailsInspector({
               value={userPrompt}
               onChange={(e) => setUserPrompt(e.target.value)}
               className={cn(INPUT_DARK, 'w-full rounded-md border px-2 py-1.5')}
+            />
+          </div>
+          <div>
+            <FieldLabel htmlFor="guard-allowed-deletions">
+              Approved deletions — symbols the healer must NOT restore (comma-separated, optional)
+            </FieldLabel>
+            <input
+              id="guard-allowed-deletions"
+              value={allowedDeletions}
+              onChange={(e) => setAllowedDeletions(e.target.value)}
+              className={cn(INPUT_DARK, 'w-full rounded-md border px-2 py-1.5')}
+              placeholder="e.g. revokeAll, SessionAuth.revokeSessionToken"
             />
           </div>
           <button

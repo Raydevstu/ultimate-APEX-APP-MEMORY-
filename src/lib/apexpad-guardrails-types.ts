@@ -172,6 +172,8 @@ export interface InspectGuardrailsRequest {
   previousContent: string;
   proposedContent: string;
   userPrompt: string;
+  /** Symbols the user explicitly approved for deletion — the healer will NOT splice these back. */
+  allowedSymbolDeletions?: string[];
 }
 
 export interface InspectGuardrailsResponse {

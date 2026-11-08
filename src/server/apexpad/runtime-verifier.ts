@@ -894,10 +894,15 @@ export class RuntimeVerificationEngine {
       testRunnerOutputCcrId = null;
     }
 
-    // Gate 3: Agent-Browser verification loop.
+    // Gate 3: Agent-Browser verification loop (stops immediately on any loud
+    // failure — blueprint §7.5 runFullArtifactVerification semantics).
     const agentBrowserResults: AgentBrowserActionExecutionResult[] = [];
     for (const command of params.browserVerificationScript ?? []) {
-      agentBrowserResults.push(await this.executeAgentBrowserCommand(params.sessionId, command));
+      const result = await this.executeAgentBrowserCommand(params.sessionId, command);
+      agentBrowserResults.push(result);
+      if (!result.success) {
+        break;
+      }
     }
     const browserAllPassed =
       agentBrowserResults.length === 0 || agentBrowserResults.every((r) => r.success);

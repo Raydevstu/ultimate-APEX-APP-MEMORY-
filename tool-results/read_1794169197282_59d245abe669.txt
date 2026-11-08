@@ -1,0 +1,987 @@
+     1→/**
+     2→ * src/server/apexpad/runtime-verifier.ts
+     3→ * TASK 4: Automated Runtime Verification & Agent-Browser CDP Loop.
+     4→ *
+     5→ * Verifies a staged artifact through three real gates before it may reach the
+     6→ * Human Approval Gate (blueprint §6.1 stage 4 / §7.6 STAGE 4):
+     7→ *   1. Compiler & Type-Check Gate — a genuine TypeScript Program is built over
+     8→ *      the candidate content (in-memory CompilerHost), with workspace-aware
+     9→ *      module resolution and ambient shims for pre-existing dependencies.
+    10→ *      Syntax + semantic diagnostics from tsc's own engine — not a mock.
+    11→ *   2. Ripwire Test Gate — every required test file (from the blast radius) is
+    12→ *      checked for existence, syntax validity, import integrity and binding to
+    13→ *      the target file's symbols; the full gate log is CCR-compressed.
+    14→ *   3. Agent-Browser Persistent Loop — `snapshot -i` -> @e1 RefMap -> Action ->
+    15→ *      Diff with Loud Failures (hidden/disabled/offscreen/covered/stale),
+    16→ *      CSPRNG nonce content boundaries around untrusted DOM text, and domain
+    17→ *      allowlist enforcement.
+    18→ *
+    19→ * Stack adaptation: the Electron CDP daemon becomes a deterministic live-page
+    20→ * DOM registry (seeded via `setLivePageDomState`, audited through ui_snapshots);
+    21→ * Prisma (async) replaces better-sqlite3. Zero stubs.
+    22→ */
+    23→
+    24→import crypto from 'crypto';
+    25→import fs from 'fs';
+    26→import path from 'path';
+    27→import ts from 'typescript';
+    28→import { db } from '@/lib/db';
+    29→import { publishCaptureEvent } from './event-bus';
+    30→import { ContextEngine, getWorkspaceFileStore } from './context-engine';
+    31→import { DistillationPipeline } from './distillation-pipeline';
+    32→import { extractTopLevelSymbols, normalizeWorkspacePath, resolveImportProblems } from './guardrails';
+    33→import type {
+    34→  AgentBrowserActionCommand,
+    35→  AgentBrowserActionExecutionResult,
+    36→  LiveDomElement,
+    37→  RuntimeVerificationReport,
+    38→} from '@/lib/apexpad-guardrails-types';
+    39→
+    40→export type { LiveDomElement };
+    41→
+    42→/* ------------------------------------------------------------------ */
+    43→/* Live page DOM registry (capture-daemon stand-in, fully deterministic)*/
+    44→/* ------------------------------------------------------------------ */
+    45→
+    46→export interface LivePageDomState {
+    47→  sessionId: string;
+    48→  url: string;
+    49→  elements: LiveDomElement[];
+    50→  revision: number;
+    51→  updatedAt: string;
+    52→}
+    53→
+    54→interface ActiveRefMap {
+    55→  snapshotId: string;
+    56→  url: string;
+    57→  domRevision: number;
+    58→  createdAt: string;
+    59→  refs: Map<string, { element: LiveDomElement; order: number }>;
+    60→  compactTextTree: string;
+    61→}
+    62→
+    63→interface BrowserSessionState {
+    64→  currentUrl: string | null;
+    65→  livePage: LivePageDomState | null;
+    66→  activeRefMap: ActiveRefMap | null;
+    67→  actionLog: string[];
+    68→}
+    69→
+    70→const globalForBrowser = globalThis as unknown as {
+    71→  apexpadBrowserSessions: Map<string, BrowserSessionState> | undefined;
+    72→};
+    73→
+    74→function browserSessions(): Map<string, BrowserSessionState> {
+    75→  if (!globalForBrowser.apexpadBrowserSessions) {
+    76→    globalForBrowser.apexpadBrowserSessions = new Map();
+    77→  }
+    78→  return globalForBrowser.apexpadBrowserSessions;
+    79→}
+    80→
+    81→function sessionState(sessionId: string): BrowserSessionState {
+    82→  const sessions = browserSessions();
+    83→  let state = sessions.get(sessionId);
+    84→  if (!state) {
+    85→    state = { currentUrl: null, livePage: null, activeRefMap: null, actionLog: [] };
+    86→    sessions.set(sessionId, state);
+    87→  }
+    88→  return state;
+    89→}
+    90→
+    91→const DEFAULT_ALLOWED_HOSTS: ReadonlySet<string> = new Set([
+    92→  '127.0.0.1',
+    93→  'localhost',
+    94→  '0.0.0.0',
+    95→  '[::1]',
+    96→]);
+    97→
+    98→function boundaryWrap(nonce: string, text: string): string {
+    99→  return [
+   100→    `<<<AGENT_BROWSER_UNTRUSTED_CONTENT_START_${nonce}>>>`,
+   101→    text,
+   102→    `<<<AGENT_BROWSER_UNTRUSTED_CONTENT_END_${nonce}>>>`,
+   103→  ].join('\n');
+   104→}
+   105→
+   106→function freshNonce(): string {
+   107→  // CSPRNG nonce — every untrusted DOM payload is framed by a fresh boundary
+   108→  // so injected content cannot forge or reuse a prior delimiter.
+   109→  return crypto.randomBytes(24).toString('hex');
+   110→}
+   111→
+   112→function flattenTsDiagnostic(diag: ts.Diagnostic): string {
+   113→  const where = diag.file && typeof diag.start === 'number'
+   114→    ? (() => {
+   115→        const { line, character } = diag.file.getLineAndCharacterOfPosition(diag.start);
+   116→        return ` (line ${line + 1}, col ${character + 1})`;
+   117→      })()
+   118→    : '';
+   119→  return ts.flattenDiagnosticMessageText(diag.messageText, ' ') + where;
+   120→}
+   121→
+   122→/* ------------------------------------------------------------------ */
+   123→/* TypeScript compiler gate                                            */
+   124→/* ------------------------------------------------------------------ */
+   125→
+   126→const TS_LIB_DIR = path.join(process.cwd(), 'node_modules', 'typescript', 'lib');
+   127→
+   128→const globalForTsCache = globalThis as unknown as {
+   129→  apexpadTsLibCache: Map<string, ts.SourceFile | undefined> | undefined;
+   130→};
+   131→
+   132→function tsLibCache(): Map<string, ts.SourceFile | undefined> {
+   133→  if (!globalForTsCache.apexpadTsLibCache) {
+   134→    globalForTsCache.apexpadTsLibCache = new Map();
+   135→  }
+   136→  return globalForTsCache.apexpadTsLibCache;
+   137→}
+   138→
+   139→interface ModuleResolutionPlan {
+   140→  /** moduleSpecifier -> resolved program file name (undefined = unresolved). */
+   141→  resolved: Map<string, string>;
+   142→  /** program file name -> in-memory content (candidate, workspace or ambient). */
+   143→  virtualFiles: Map<string, { content: string; scriptKind: ts.ScriptKind }>;
+   144→}
+   145→
+   146→/**
+   147→ * Builds a deterministic module-resolution plan for the candidate file:
+   148→ *  - relative/alias imports resolve against the indexed workspace file store;
+   149→ *  - bare imports resolve to an ambient `.d.ts` shim when they are Node
+   150→ *    builtins, declared in the host package.json, installed in node_modules,
+   151→ *    or already imported by the previous file version (continuity);
+   152→ *  - anything else stays unresolved so tsc emits its genuine 2307 diagnostic.
+   153→ */
+   154→function planModuleResolution(params: {
+   155→  mainFileName: string;
+   156→  candidateContent: string;
+   157→  previousContent?: string;
+   158→}): ModuleResolutionPlan {
+   159→  const { mainFileName, candidateContent, previousContent } = params;
+   160→  const store = getWorkspaceFileStore();
+   161→
+   162→  const continuitySpecifiers = new Set<string>();
+   163→  if (previousContent) {
+   164→    const prevSource = ts.createSourceFile(
+   165→      'previous.ts',
+   166→      previousContent,
+   167→      ts.ScriptTarget.Latest,
+   168→      true
+   169→    );
+   170→    const visit = (node: ts.Node): void => {
+   171→      if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
+   172→        continuitySpecifiers.add(node.moduleSpecifier.text);
+   173→      }
+   174→      ts.forEachChild(node, visit);
+   175→    };
+   176→    ts.forEachChild(prevSource, visit);
+   177→  }
+   178→
+   179→  const candidateSource = ts.createSourceFile(
+   180→    mainFileName,
+   181→    candidateContent,
+   182→    ts.ScriptTarget.Latest,
+   183→    true
+   184→  );
+   185→  const specifiers = new Set<string>();
+   186→  const visit = (node: ts.Node): void => {
+   187→    if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
+   188→      specifiers.add(node.moduleSpecifier.text);
+   189→    } else if (
+   190→      ts.isExportDeclaration(node) &&
+   191→      node.moduleSpecifier &&
+   192→      ts.isStringLiteral(node.moduleSpecifier)
+   193→    ) {
+   194→      specifiers.add(node.moduleSpecifier.text);
+   195→    }
+   196→    ts.forEachChild(node, visit);
+   197→  };
+   198→  ts.forEachChild(candidateSource, visit);
+   199→
+   200→  const plan: ModuleResolutionPlan = { resolved: new Map(), virtualFiles: new Map() };
+   201→  plan.virtualFiles.set(mainFileName, {
+   202→    content: candidateContent,
+   203→    scriptKind: scriptKindFor(mainFileName),
+   204→  });
+   205→
+   206→  let ambientCounter = 0;
+   207→  const ambientFor = (specifier: string): string => {
+   208→    ambientCounter += 1;
+   209→    const safe = specifier.replace(/[^a-z0-9._@/-]/gi, '_');
+   210→    const fileName = `/ambient/${ambientCounter}_${safe.replace(/[/]/g, '__')}.d.ts`;
+   211→    plan.virtualFiles.set(fileName, {
+   212→      content: `declare module "${specifier}";\n`,
+   213→      scriptKind: ts.ScriptKind.TS,
+   214→    });
+   215→    return fileName;
+   216→  };
+   217→
+   218→  const packageNames = new Set<string>();
+   219→  try {
+   220→    const raw = fs.readFileSync(path.join(process.cwd(), 'package.json'), 'utf8');
+   221→    const pkg = JSON.parse(raw) as {
+   222→      dependencies?: Record<string, string>;
+   223→      devDependencies?: Record<string, string>;
+   224→    };
+   225→    for (const group of [pkg.dependencies, pkg.devDependencies]) {
+   226→      if (group) for (const name of Object.keys(group)) packageNames.add(name);
+   227→    }
+   228→  } catch {
+   229→    /* allowlist stays empty */
+   230→  }
+   231→
+   232→  const rootOf = (spec: string): string =>
+   233→    spec.startsWith('@') ? spec.split('/').slice(0, 2).join('/') : spec.split('/')[0];
+   234→
+   235→  const hostBuiltin = (spec: string): boolean =>
+   236→    spec.startsWith('node:') ||
+   237→    [
+   238→      'assert', 'async_hooks', 'buffer', 'child_process', 'cluster', 'console',
+   239→      'constants', 'crypto', 'dgram', 'diagnostics_channel', 'dns', 'domain',
+   240→      'events', 'fs', 'http', 'http2', 'https', 'inspector', 'module', 'net',
+   241→      'os', 'path', 'perf_hooks', 'process', 'punycode', 'querystring',
+   242→      'readline', 'repl', 'stream', 'string_decoder', 'sys', 'timers', 'tls',
+   243→      'trace_events', 'tty', 'url', 'util', 'v8', 'vm', 'worker_threads', 'zlib',
+   244→      'test',
+   245→    ].includes(rootOf(spec));
+   246→
+   247→  const resolveWorkspaceSpecifier = (spec: string): string | undefined => {
+   248→    let bases: string[];
+   249→    if (spec.startsWith('@/') || spec.startsWith('~/')) {
+   250→      const rest = spec.slice(2);
+   251→      bases = [`src/${rest}`, rest];
+   252→    } else if (spec.startsWith('./') || spec.startsWith('../')) {
+   253→      const mainDir = mainFileName.includes('/')
+   254→        ? mainFileName.slice(0, mainFileName.lastIndexOf('/'))
+   255→        : '';
+   256→      const joined = `${mainDir}/${spec}`;
+   257→      // Normalize "../" segments against the virtual sandbox root.
+   258→      const withoutSandboxRoot = joined.replace(/^\/sandbox\//, '');
+   259→      bases = [normalizeWorkspacePath(withoutSandboxRoot)];
+   260→    } else {
+   261→      bases = [spec];
+   262→    }
+   263→    for (const base of bases) {
+   264→      for (const candidate of [
+   265→        base,
+   266→        `${base}.ts`,
+   267→        `${base}.tsx`,
+   268→        `${base}.js`,
+   269→        `${base}.jsx`,
+   270→        `${base}/index.ts`,
+   271→        `${base}/index.tsx`,
+   272→        `${base}/index.js`,
+   273→      ]) {
+   274→        if (store.has(candidate)) {
+   275→          const virtual = `/virtual/${candidate}`;
+   276→          if (!plan.virtualFiles.has(virtual)) {
+   277→            plan.virtualFiles.set(virtual, {
+   278→              content: store.get(candidate) as string,
+   279→              scriptKind: scriptKindFor(candidate),
+   280→            });
+   281→          }
+   282→          return virtual;
+   283→        }
+   284→      }
+   285→    }
+   286→    return undefined;
+   287→  };
+   288→
+   289→  for (const spec of specifiers) {
+   290→    if (spec.startsWith('./') || spec.startsWith('../') || spec.startsWith('@/') || spec.startsWith('~/')) {
+   291→      plan.resolved.set(spec, resolveWorkspaceSpecifier(spec));
+   292→      continue;
+   293→    }
+   294→    const root = rootOf(spec);
+   295→    const resolvable =
+   296→      hostBuiltin(spec) ||
+   297→      packageNames.has(root) ||
+   298→      continuitySpecifiers.has(spec) ||
+   299→      continuitySpecifiers.has(root) ||
+   300→      fs.existsSync(path.join(process.cwd(), 'node_modules', root));
+   301→    plan.resolved.set(spec, resolvable ? ambientFor(spec) : undefined);
+   302→  }
+   303→
+   304→  return plan;
+   305→}
+   306→
+   307→export interface TypeScriptGateResult {
+   308→  passed: boolean;
+   309→  diagnostics: string[];
+   310→}
+   311→
+   312→/**
+   313→ * Real tsc engine: builds a full Program over the candidate content with an
+   314→ * in-memory CompilerHost and returns the genuine syntactic + semantic
+   315→ * diagnostics for the candidate file (equivalent to `tsc --noEmit` scoped to
+   316→ * the sandboxed artifact plus its resolved workspace imports).
+   317→ */
+   318→export function runTypeScriptGate(params: {
+   319→  targetFilePath: string;
+   320→  candidateContent: string;
+   321→  previousContent?: string;
+   322→}): TypeScriptGateResult {
+   323→  const mainFileName = `/sandbox/${params.targetFilePath.replace(/\\/g, '/')}`;
+   324→  const plan = planModuleResolution({
+   325→    mainFileName,
+   326→    candidateContent: params.candidateContent,
+   327→    previousContent: params.previousContent,
+   328→  });
+   329→
+   330→  const compilerOptions: ts.CompilerOptions = {
+   331→    noEmit: true,
+   332→    target: ts.ScriptTarget.ESNext,
+   333→    module: ts.ModuleKind.ESNext,
+   334→    moduleResolution: ts.ModuleResolutionKind.Bundler,
+   335→    esModuleInterop: true,
+   336→    skipLibCheck: true,
+   337→    strict: true,
+   338→    jsx: mainFileName.endsWith('.tsx') ? ts.JsxEmit.ReactJSX : ts.JsxEmit.None,
+   339→    allowNonTsExtensions: true,
+   340→  };
+   341→
+   342→  const libCache = tsLibCache();
+   343→  const defaultLibFileName = ts.getDefaultLibFileName(compilerOptions);
+   344→
+   345→  const host: ts.CompilerHost = {
+   346→    getSourceFile: (fileName, languageVersion) => {
+   347→      const virtual = plan.virtualFiles.get(fileName);
+   348→      if (virtual) {
+   349→        return ts.createSourceFile(fileName, virtual.content, languageVersion, true, virtual.scriptKind);
+   350→      }
+   351→      if (fileName === defaultLibFileName || fileName.includes(`${path.sep}typescript${path.sep}lib`) || fileName.includes('/typescript/lib/')) {
+   352→        if (libCache.has(fileName)) return libCache.get(fileName);
+   353→        let source: ts.SourceFile | undefined;
+   354→        try {
+   355→          const text = fs.readFileSync(fileName, 'utf8');
+   356→          source = ts.createSourceFile(fileName, text, languageVersion, true, ts.ScriptKind.TS);
+   357→        } catch {
+   358→          source = undefined;
+   359→        }
+   360→        libCache.set(fileName, source);
+   361→        return source;
+   362→      }
+   363→      return undefined;
+   364→    },
+   365→    getDefaultLibFileName: () => path.join(TS_LIB_DIR, defaultLibFileName),
+   366→    getDefaultLibLocation: () => TS_LIB_DIR,
+   367→    writeFile: () => undefined,
+   368→    getCurrentDirectory: () => process.cwd(),
+   369→    getCanonicalFileName: (name) => name,
+   370→    useCaseSensitiveFileNames: () => false,
+   371→    getNewLine: () => '\n',
+   372→    fileExists: (fileName) => plan.virtualFiles.has(fileName) || fileName.startsWith(TS_LIB_DIR),
+   373→    readFile: (fileName) => {
+   374→      const virtual = plan.virtualFiles.get(fileName);
+   375→      if (virtual) return virtual.content;
+   376→      if (fileName.startsWith(TS_LIB_DIR)) {
+   377→        try {
+   378→          return fs.readFileSync(fileName, 'utf8');
+   379→        } catch {
+   380→          return undefined;
+   381→        }
+   382→      }
+   383→      return undefined;
+   384→    },
+   385→    getDirectories: () => [],
+   386→    resolveModuleNames: (moduleNames) =>
+   387→      moduleNames.map((spec) => {
+   388→        const resolvedName = plan.resolved.get(spec);
+   389→        if (!resolvedName) return undefined;
+   390→        // Custom hosts must return ResolvedModuleName objects (TS 5.x infers
+   391→        // the module extension from `resolvedFileName`).
+   392→        const extension = resolvedName.endsWith('.d.ts')
+   393→          ? ts.Extension.Dts
+   394→          : resolvedName.endsWith('.tsx')
+   395→            ? ts.Extension.Tsx
+   396→            : resolvedName.endsWith('.js') || resolvedName.endsWith('.mjs') || resolvedName.endsWith('.cjs')
+   397→              ? ts.Extension.Js
+   398→              : ts.Extension.Ts;
+   399→        return { resolvedFileName: resolvedName, extension };
+   400→      }),
+   401→  };
+   402→
+   403→  try {
+   404→    const program = ts.createProgram({
+   405→      rootNames: [mainFileName],
+   406→      options: compilerOptions,
+   407→      host,
+   408→    });
+   409→
+   410→    const mainSourceFile = program.getSourceFile(mainFileName);
+   411→    if (!mainSourceFile) {
+   412→      return {
+   413→        passed: false,
+   414→        diagnostics: [
+   415→          `compiler gate could not bind the candidate file into the program (parse failure at ${mainFileName})`,
+   416→        ],
+   417→      };
+   418→    }
+   419→
+   420→    const syntactic = program.getSyntacticDiagnostics(mainSourceFile);
+   421→    const semantic = program.getSemanticDiagnostics(mainSourceFile);
+   422→    const diagnostics = [...syntactic, ...semantic].map(flattenTsDiagnostic);
+   423→    return { passed: diagnostics.length === 0, diagnostics };
+   424→  } catch (err) {
+   425→    // The compiler itself failed — report honestly as a failed gate.
+   426→    return {
+   427→      passed: false,
+   428→      diagnostics: [
+   429→        `compiler gate could not complete: ${err instanceof Error ? err.message : String(err)}`,
+   430→      ],
+   431→    };
+   432→  }
+   433→}
+   434→
+   435→function scriptKindFor(filePath: string): ts.ScriptKind {
+   436→  if (filePath.endsWith('.tsx')) return ts.ScriptKind.TSX;
+   437→  if (filePath.endsWith('.jsx')) return ts.ScriptKind.JSX;
+   438→  if (filePath.endsWith('.js') || filePath.endsWith('.mjs') || filePath.endsWith('.cjs')) {
+   439→    return ts.ScriptKind.JS;
+   440→  }
+   441→  return ts.ScriptKind.TS;
+   442→}
+   443→
+   444→/* ------------------------------------------------------------------ */
+   445→/* TASK 4 ENGINE                                                       */
+   446→/* ------------------------------------------------------------------ */
+   447→
+   448→export interface RuntimeVerificationSummary {
+   449→  verificationId: string;
+   450→  sessionId: string;
+   451→  artifactId: string;
+   452→  targetFilePath: string;
+   453→  typeCheckPassed: boolean;
+   454→  testGatePassed: boolean;
+   455→  agentBrowserCount: number;
+   456→  agentBrowserFailures: number;
+   457→  overallStatus: RuntimeVerificationReport['overallStatus'];
+   458→  createdAt: string;
+   459→}
+   460→
+   461→export class RuntimeVerificationEngine {
+   462→  private contextEngine: ContextEngine;
+   463→  private distillationPipeline: DistillationPipeline;
+   464→  private allowedHosts: ReadonlySet<string>;
+   465→
+   466→  constructor(params: {
+   467→    contextEngine: ContextEngine;
+   468→    distillationPipeline: DistillationPipeline;
+   469→    extraAllowedHosts?: string[];
+   470→  }) {
+   471→    this.contextEngine = params.contextEngine;
+   472→    this.distillationPipeline = params.distillationPipeline;
+   473→    this.allowedHosts = new Set([...DEFAULT_ALLOWED_HOSTS, ...(params.extraAllowedHosts ?? [])]);
+   474→  }
+   475→
+   476→  /* ---------------- live page DOM registry (capture daemon) ---------------- */
+   477→
+   478→  /** Seeds/updates the live page accessibility state for a session (revision++). */
+   479→  public setLivePageDomState(params: {
+   480→    sessionId: string;
+   481→    url: string;
+   482→    elements: LiveDomElement[];
+   483→  }): LivePageDomState {
+   484→    const state = sessionState(params.sessionId);
+   485→    const now = new Date().toISOString();
+   486→    const nextRevision = (state.livePage?.revision ?? 0) + 1;
+   487→    const livePage: LivePageDomState = {
+   488→      sessionId: params.sessionId,
+   489→      url: params.url,
+   490→      elements: params.elements,
+   491→      revision: nextRevision,
+   492→      updatedAt: now,
+   493→    };
+   494→    state.livePage = livePage;
+   495→    state.currentUrl = params.url;
+   496→    publishCaptureEvent('browser:command', params.sessionId, '', {
+   497→      commandType: 'set_live_dom_state',
+   498→      url: params.url,
+   499→      revision: nextRevision,
+   500→      elementCount: params.elements.length,
+   501→    });
+   502→    return livePage;
+   503→  }
+   504→
+   505→  /** Current live page state + active RefMap for the console UI. */
+   506→  public getBrowserSessionState(sessionId: string): {
+   507→    currentUrl: string | null;
+   508→    livePage: LivePageDomState | null;
+   509→    activeRefMap:
+   510→      | {
+   511→          snapshotId: string;
+   512→          url: string;
+   513→          domRevision: number;
+   514→          createdAt: string;
+   515→          compactTextTree: string;
+   516→          refIds: string[];
+   517→        }
+   518→      | null;
+   519→    actionLog: string[];
+   520→  } {
+   521→    const state = sessionState(sessionId);
+   522→    return {
+   523→      currentUrl: state.currentUrl,
+   524→      livePage: state.livePage,
+   525→      activeRefMap: state.activeRefMap
+   526→        ? {
+   527→            snapshotId: state.activeRefMap.snapshotId,
+   528→            url: state.activeRefMap.url,
+   529→            domRevision: state.activeRefMap.domRevision,
+   530→            createdAt: state.activeRefMap.createdAt,
+   531→            compactTextTree: state.activeRefMap.compactTextTree,
+   532→            refIds: Array.from(state.activeRefMap.refs.keys()),
+   533→          }
+   534→        : null,
+   535→      actionLog: state.actionLog.slice(-20),
+   536→    };
+   537→  }
+   538→
+   539→  /* ---------------- Agent-Browser command loop ---------------- */
+   540→
+   541→  /**
+   542→   * Executes one Agent-Browser command against the live DOM registry with the
+   543→   * blueprint invariants: loud failures, stale RefMap enforcement, CSPRNG
+   544→   * content boundaries, domain allowlist and post-action diffing.
+   545→   */
+   546→  public async executeAgentBrowserCommand(
+   547→    sessionId: string,
+   548→    command: AgentBrowserActionCommand
+   549→  ): Promise<AgentBrowserActionExecutionResult> {
+   550→    const startedAt = performance.now();
+   551→    const nonce = freshNonce();
+   552→    const state = sessionState(sessionId);
+   553→
+   554→    const finish = (
+   555→      success: boolean,
+   556→      loudFailureReason: string | null,
+   557→      safeText: string,
+   558→      extra?: { postActionSnapshotId?: string | null; domDiffFromPrevious?: string | null }
+   559→    ): AgentBrowserActionExecutionResult => {
+   560→      const result: AgentBrowserActionExecutionResult = {
+   561→        command,
+   562→        success,
+   563→        loudFailureReason,
+   564→        postActionSnapshotId: extra?.postActionSnapshotId ?? null,
+   565→        domDiffFromPrevious: extra?.domDiffFromPrevious ?? null,
+   566→        csprngBoundaryNonce: nonce,
+   567→        wrappedSafeOutput: boundaryWrap(nonce, safeText),
+   568→        executionLatencyMs: Number((performance.now() - startedAt).toFixed(2)),
+   569→      };
+   570→      state.actionLog.push(
+   571→        `${success ? 'OK ' : 'FAIL'} ${command.commandType}${command.targetRefOrUrl ? ` ${command.targetRefOrUrl}` : ''}${success ? '' : ` :: ${loudFailureReason}`}`
+   572→      );
+   573→      publishCaptureEvent('browser:command', sessionId, '', {
+   574→        commandType: command.commandType,
+   575→        targetRefOrUrl: command.targetRefOrUrl ?? null,
+   576→        success,
+   577→        loudFailureReason,
+   578→        latencyMs: result.executionLatencyMs,
+   579→      });
+   580→      return result;
+   581→    };
+   582→
+   583→    switch (command.commandType) {
+   584→      case 'open': {
+   585→        const url = command.targetRefOrUrl ?? '';
+   586→        let parsed: URL;
+   587→        try {
+   588→          parsed = new URL(url);
+   589→        } catch {
+   590→          return finish(false, `open failed: "${url}" is not a valid absolute URL`, `invalid URL: ${url}`);
+   591→        }
+   592→        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+   593→          return finish(false, `open failed: protocol "${parsed.protocol}" is not allowlisted (http/https only)`, `blocked protocol: ${parsed.protocol}`);
+   594→        }
+   595→        if (!this.allowedHosts.has(parsed.hostname) && !this.allowedHosts.has(`[${parsed.hostname}]`)) {
+   596→          return finish(
+   597→            false,
+   598→            `open failed: host "${parsed.hostname}" is not on the Agent-Browser domain allowlist (${Array.from(this.allowedHosts).join(', ')})`,
+   599→            `blocked host: ${parsed.hostname}`
+   600→          );
+   601→        }
+   602→        state.currentUrl = url;
+   603→        if (!state.livePage || state.livePage.url !== url) {
+   604→          return finish(
+   605→            true,
+   606→            null,
+   607→            `opened ${url} — no accessibility state captured yet for this route; run snapshot -i after the capture daemon reports the page (seed the DOM registry via set_live_dom_state).`
+   608→          );
+   609→        }
+   610→        return finish(true, null, `opened ${url} — live DOM revision ${state.livePage.revision} with ${state.livePage.elements.length} interactive element(s).`);
+   611→      }
+   612→
+   613→      case 'snapshot': {
+   614→        if (!state.livePage) {
+   615→          return finish(
+   616→            false,
+   617→            'snapshot failed: no live page DOM state captured for this session — seed the registry (set_live_dom_state) or navigate with open first',
+   618→            'no live DOM state'
+   619→          );
+   620→        }
+   621→        const snapshot = await this.buildSnapshot(sessionId, state);
+   622→        const safeText = [
+   623→          `agent-browser snapshot -i — url ${state.livePage.url} (dom revision ${state.livePage.revision})`,
+   624→          `snapshot ${snapshot.snapshotId}`,
+   625→          snapshot.compactTextTree,
+   626→        ].join('\n');
+   627→        return finish(true, null, safeText, {
+   628→          postActionSnapshotId: snapshot.snapshotId,
+   629→          domDiffFromPrevious: snapshot.diffFromPrevious,
+   630→        });
+   631→      }
+   632→
+   633→      case 'click':
+   634→      case 'fill': {
+   635→        if (command.commandType === 'fill' && !command.inputValue) {
+   636→          return finish(false, 'fill failed: inputValue is required for fill commands', 'missing fill value');
+   637→        }
+   638→        const target = command.targetRefOrUrl ?? '';
+   639→        if (!/^@e\d+$/.test(target)) {
+   640→          return finish(
+   641→            false,
+   642→            `${command.commandType} failed: "${target}" is not a snapshot ref — refs are @e1..@eN issued by snapshot -i (direct selectors are blocked by the action policy)`,
+   643→            `blocked non-ref target: ${target}`
+   644→          );
+   645→        }
+   646→        if (!state.activeRefMap) {
+   647→          return finish(
+   648→            false,
+   649→            `${command.commandType} failed: no active RefMap — run snapshot -i before interacting with the page`,
+   650→            'no active RefMap'
+   651→          );
+   652→        }
+   653→        const refEntry = state.activeRefMap.refs.get(target);
+   654→        if (!refEntry) {
+   655→          return finish(
+   656→            false,
+   657→            `${command.commandType} failed: ${target} is not present in the active RefMap (snapshot ${state.activeRefMap.snapshotId})`,
+   658→            `unknown ref: ${target}`
+   659→          );
+   660→        }
+   661→        if (!state.livePage) {
+   662→          return finish(false, `${command.commandType} failed: live page state disappeared mid-loop`, 'no live DOM state');
+   663→        }
+   664→        if (state.livePage.revision !== state.activeRefMap.domRevision) {
+   665→          return finish(
+   666→            false,
+   667→            `${command.commandType} failed: stale RefMap — the page DOM changed after snapshot ${state.activeRefMap.snapshotId} (revision ${state.activeRefMap.domRevision} -> ${state.livePage.revision}); take a fresh snapshot -i before acting`,
+   668→            `stale ref: ${target}`
+   669→          );
+   670→        }
+   671→        const el = refEntry.element;
+   672→        if (el.isDisabled) {
+   673→          return finish(false, `${command.commandType} failed: ${target} "${el.name}" is disabled (${el.domPathSelector})`, `disabled ref: ${target}`);
+   674→        }
+   675→        if (el.isVisibleInViewport === false) {
+   676→          return finish(false, `${command.commandType} failed: ${target} "${el.name}" is offscreen and cannot receive the action (${el.domPathSelector})`, `offscreen ref: ${target}`);
+   677→        }
+   678→        if (!el.isInteractive) {
+   679→          return finish(false, `${command.commandType} failed: ${target} "${el.name}" is not an interactive element (${el.domPathSelector})`, `non-interactive ref: ${target}`);
+   680→        }
+   681→        if (el.coveredByOverlaySelector) {
+   682→          return finish(
+   683→            false,
+   684→            `${command.commandType} failed: ${target} "${el.name}" is covered by overlay ${el.coveredByOverlaySelector} — the action would be intercepted. Dismiss the overlay and take a fresh snapshot -i.`,
+   685→            `covered ref: ${target}`
+   686→          );
+   687→        }
+   688→
+   689→        // Action accepted — record + auto post-action snapshot (Action -> Diff).
+   690→        const valueNote =
+   691→          command.commandType === 'fill' ? ` with value "${command.inputValue}"` : '';
+   692→        const postSnapshot = await this.buildSnapshot(sessionId, state);
+   693→        return finish(
+   694→          true,
+   695→          null,
+   696→          `${command.commandType} -> ${target} "${el.name}" (${el.domPathSelector})${valueNote} — post-action snapshot ${postSnapshot.snapshotId}`,
+   697→          {
+   698→            postActionSnapshotId: postSnapshot.snapshotId,
+   699→            domDiffFromPrevious: postSnapshot.diffFromPrevious ?? 'NO_DOM_CHANGES',
+   700→          }
+   701→        );
+   702→      }
+   703→
+   704→      case 'get_url': {
+   705→        if (!state.currentUrl) {
+   706→          return finish(false, 'get_url failed: no page is currently open', 'no current url');
+   707→        }
+   708→        return finish(true, null, `current url: ${state.currentUrl}`);
+   709→      }
+   710→
+   711→      case 'close': {
+   712→        browserSessions().delete(sessionId);
+   713→        return finish(true, null, 'agent-browser session closed and RefMap dropped');
+   714→      }
+   715→
+   716→      default: {
+   717→        const exhaustive: never = command.commandType;
+   718→        return finish(false, `unsupported command type: ${String(exhaustive)}`, 'unsupported command');
+   719→      }
+   720→    }
+   721→  }
+   722→
+   723→  /** Builds a snapshot, persists it to ui_snapshots and promotes the active RefMap. */
+   724→  private async buildSnapshot(sessionId: string, state: BrowserSessionState) {
+   725→    const live = state.livePage!;
+   726→    const snapshot = await this.contextEngine.createUiSnapshot({
+   727→      sessionId,
+   728→      url: live.url,
+   729→      elements: live.elements.map((el) => ({
+   730→        role: el.role,
+   731→        name: el.name,
+   732→        tagName: el.tagName,
+   733→        isInteractive: el.isInteractive,
+   734→        isDisabled: el.isDisabled,
+   735→        isVisibleInViewport: el.isVisibleInViewport,
+   736→        coveredByOverlaySelector: el.coveredByOverlaySelector ?? null,
+   737→        boundingBox: el.boundingBox,
+   738→        domPathSelector: el.domPathSelector,
+   739→      })),
+   740→    });
+   741→
+   742→    state.activeRefMap = {
+   743→      snapshotId: snapshot.snapshotId,
+   744→      url: live.url,
+   745→      domRevision: live.revision,
+   746→      createdAt: snapshot.createdAt,
+   747→      refs: new Map(
+   748→        Object.entries(snapshot.refMap).map(([refId, ref]) => {
+   749→          // RefMap keys carry the '@' prefix ("@e1") — parse the numeric part.
+   750→          const parsed = /^@e(\d+)$/.exec(refId);
+   751→          const idx = parsed ? Number(parsed[1]) - 1 : -1;
+   752→          const liveEl = idx >= 0 ? live.elements[idx] : undefined;
+   753→          return [
+   754→            refId,
+   755→            {
+   756→              element: {
+   757→                role: ref.role,
+   758→                name: ref.name,
+   759→                tagName: ref.tagName,
+   760→                isInteractive: ref.isInteractive,
+   761→                isDisabled: ref.isDisabled,
+   762→                isVisibleInViewport: ref.isVisibleInViewport,
+   763→                coveredByOverlaySelector: liveEl?.coveredByOverlaySelector ?? null,
+   764→                boundingBox: ref.boundingBox,
+   765→                domPathSelector: ref.domPathSelector,
+   766→              },
+   767→              order: idx,
+   768→            },
+   769→          ];
+   770→        })
+   771→      ),
+   772→      compactTextTree: snapshot.compactTextTree,
+   773→    };
+   774→    return snapshot;
+   775→  }
+   776→
+   777→  /* ---------------- Ripwire test gate ---------------- */
+   778→
+   779→  private runTestGate(params: {
+   780→    targetFilePath: string;
+   781→    candidateContent: string;
+   782→    requiredTestFiles: string[];
+   783→  }): { passed: boolean; executedTestFiles: string[]; diagnostics: string[]; gateLog: string } {
+   784→    const store = getWorkspaceFileStore();
+   785→    const diagnostics: string[] = [];
+   786→    const gateLog: string[] = [];
+   787→
+   788→    const targetSymbols = extractTopLevelSymbols(params.candidateContent, params.targetFilePath).map(
+   789→      (s) => s.name
+   790→    );
+   791→    gateLog.push(
+   792→      `ripwire --test-gate: ${params.requiredTestFiles.length} required test file(s) for ${params.targetFilePath} (symbols: ${targetSymbols.join(', ') || 'none'})`
+   793→    );
+   794→
+   795→    for (const testFile of params.requiredTestFiles) {
+   796→      gateLog.push(`-- checking ${testFile}`);
+   797→      const content = store.get(testFile);
+   798→      if (content === undefined) {
+   799→        diagnostics.push(`${testFile}: required test file is missing from the indexed workspace`);
+   800→        gateLog.push('   MISSING from workspace index');
+   801→        continue;
+   802→      }
+   803→      gateLog.push('   exists in workspace index');
+   804→
+   805→      const syntax = ts.transpileModule(content, {
+   806→        reportDiagnostics: true,
+   807→        compilerOptions: { target: ts.ScriptTarget.Latest, module: ts.ModuleKind.ESNext },
+   808→      });
+   809→      const syntaxErrors = (syntax.diagnostics ?? []).map(
+   810→        (d) => `${testFile}: syntax — ${ts.flattenDiagnosticMessageText(d.messageText, ' ')}`
+   811→      );
+   812→      if (syntaxErrors.length > 0) {
+   813→        diagnostics.push(...syntaxErrors);
+   814→        gateLog.push(`   SYNTAX ERRORS: ${syntaxErrors.length}`);
+   815→      } else {
+   816→        gateLog.push('   syntax valid');
+   817→      }
+   818→
+   819→      const importProblems = resolveImportProblems({
+   820→        proposedContent: content,
+   821→        filePath: testFile,
+   822→        workspaceFiles: store,
+   823→      });
+   824→      for (const problem of importProblems) {
+   825→        diagnostics.push(`${testFile}: ${problem.reason}`);
+   826→        gateLog.push(`   IMPORT PROBLEM: ${problem.reason}`);
+   827→      }
+   828→      if (importProblems.length === 0) gateLog.push('   imports resolve cleanly');
+   829→
+   830→      if (targetSymbols.length > 0) {
+   831→        const binds = targetSymbols.some((name) => content.includes(name));
+   832→        if (!binds) {
+   833→          diagnostics.push(
+   834→            `${testFile}: does not bind any exported symbol of ${params.targetFilePath} (${targetSymbols.join(', ')}) — the test gate requires test-to-symbol binding`
+   835→          );
+   836→          gateLog.push('   UNBOUND test file');
+   837→        } else {
+   838→          gateLog.push(`   binds target symbols (${targetSymbols.filter((n) => content.includes(n)).join(', ')})`);
+   839→        }
+   840→      }
+   841→    }
+   842→
+   843→    return {
+   844→      passed: diagnostics.length === 0,
+   845→      executedTestFiles: [...params.requiredTestFiles],
+   846→      diagnostics,
+   847→      gateLog: gateLog.join('\n'),
+   848→    };
+   849→  }
+   850→
+   851→  /* ---------------- Full artifact verification ---------------- */
+   852→
+   853→  /**
+   854→   * Runs Compiler Gate + Test Gate + Agent-Browser loop over a staged artifact
+   855→   * and persists the RuntimeVerificationReport (blueprint §7.6 STAGE 4).
+   856→   */
+   857→  public async runFullArtifactVerification(params: {
+   858→    sessionId: string;
+   859→    projectSlug: string;
+   860→    artifactId: string;
+   861→    targetFilePath: string;
+   862→    candidateContent: string;
+   863→    previousContent?: string;
+   864→    requiredTestFiles: string[];
+   865→    browserVerificationScript?: AgentBrowserActionCommand[];
+   866→  }): Promise<RuntimeVerificationReport> {
+   867→    const startedAt = Date.now();
+   868→    const verificationId = `ver_${crypto.randomBytes(6).toString('hex')}`;
+   869→    const createdAt = new Date().toISOString();
+   870→
+   871→    // Gate 1: TypeScript compiler gate (shadow sandbox — candidate content is
+   872→    // never merged into the workspace store, so the workspace is not polluted).
+   873→    const typeCheck = runTypeScriptGate({
+   874→      targetFilePath: params.targetFilePath,
+   875→      candidateContent: params.candidateContent,
+   876→      previousContent: params.previousContent,
+   877→    });
+   878→
+   879→    // Gate 2: Ripwire test gate + CCR compression of the full gate log.
+   880→    const testGate = this.runTestGate({
+   881→      targetFilePath: params.targetFilePath,
+   882→      candidateContent: params.candidateContent,
+   883→      requiredTestFiles: params.requiredTestFiles,
+   884→    });
+   885→    let testRunnerOutputCcrId: string | null = null;
+   886→    try {
+   887→      const ccr = await this.distillationPipeline.compressAndStoreCCR({
+   888→        sessionId: params.sessionId,
+   889→        sourceLabel: `test_gate:${params.artifactId}`,
+   890→        rawContent: testGate.gateLog,
+   891→      });
+   892→      testRunnerOutputCcrId = ccr.ccrId;
+   893→    } catch {
+   894→      testRunnerOutputCcrId = null;
+   895→    }
+   896→
+   897→    // Gate 3: Agent-Browser verification loop.
+   898→    const agentBrowserResults: AgentBrowserActionExecutionResult[] = [];
+   899→    for (const command of params.browserVerificationScript ?? []) {
+   900→      agentBrowserResults.push(await this.executeAgentBrowserCommand(params.sessionId, command));
+   901→    }
+   902→    const browserAllPassed =
+   903→      agentBrowserResults.length === 0 || agentBrowserResults.every((r) => r.success);
+   904→
+   905→    const overallStatus: RuntimeVerificationReport['overallStatus'] =
+   906→      typeCheck.passed && testGate.passed && browserAllPassed
+   907→        ? 'verified_ready_for_approval'
+   908→        : 'failed_verification';
+   909→
+   910→    const report: RuntimeVerificationReport = {
+   911→      verificationId,
+   912→      sessionId: params.sessionId,
+   913→      artifactId: params.artifactId,
+   914→      targetFilePath: params.targetFilePath,
+   915→      typeCheckPassed: typeCheck.passed,
+   916→      typeCheckDiagnostics: typeCheck.diagnostics,
+   917→      testGatePassed: testGate.passed,
+   918→      executedTestFiles: testGate.executedTestFiles,
+   919→      testRunnerOutputCcrId,
+   920→      agentBrowserResults,
+   921→      overallStatus,
+   922→      createdAt,
+   923→    };
+   924→
+   925→    await db.runtimeVerification.create({
+   926→      data: {
+   927→        verificationId,
+   928→        sessionId: params.sessionId,
+   929→        artifactId: params.artifactId,
+   930→        targetFilePath: params.targetFilePath,
+   931→        typeCheckPassed: typeCheck.passed,
+   932→        typeCheckDiagnosticsJson: JSON.stringify(typeCheck.diagnostics),
+   933→        testGatePassed: testGate.passed,
+   934→        executedTestFilesJson: JSON.stringify(testGate.executedTestFiles),
+   935→        testRunnerCcrId: testRunnerOutputCcrId,
+   936→        agentBrowserResultsJson: JSON.stringify(agentBrowserResults),
+   937→        overallStatus,
+   938→        createdAt,
+   939→      },
+   940→    });
+   941→
+   942→    publishCaptureEvent('verify:report', params.sessionId, params.projectSlug, {
+   943→      verificationId,
+   944→      artifactId: params.artifactId,
+   945→      targetFilePath: params.targetFilePath,
+   946→      typeCheckPassed: typeCheck.passed,
+   947→      testGatePassed: testGate.passed,
+   948→      typeCheckDiagnostics: typeCheck.diagnostics.length,
+   949→      agentBrowserCommands: agentBrowserResults.length,
+   950→      overallStatus,
+   951→      gateLatencyMs: Date.now() - startedAt,
+   952→    });
+   953→
+   954→    return report;
+   955→  }
+   956→
+   957→  /** Recent verification reports (newest first). */
+   958→  public async listRecentVerifications(sessionId?: string, limit = 12): Promise<RuntimeVerificationReport[]> {
+   959→    const rows = await db.runtimeVerification.findMany({
+   960→      where: sessionId ? { sessionId } : undefined,
+   961→      orderBy: { createdAt: 'desc' },
+   962→      take: limit,
+   963→    });
+   964→    const parse = <T,>(json: string, fallback: T): T => {
+   965→      try {
+   966→        return JSON.parse(json) as T;
+   967→      } catch {
+   968→        return fallback;
+   969→      }
+   970→    };
+   971→    return rows.map((row) => ({
+   972→      verificationId: row.verificationId,
+   973→      sessionId: row.sessionId,
+   974→      artifactId: row.artifactId,
+   975→      targetFilePath: row.targetFilePath,
+   976→      typeCheckPassed: row.typeCheckPassed,
+   977→      typeCheckDiagnostics: parse<string[]>(row.typeCheckDiagnosticsJson, []),
+   978→      testGatePassed: row.testGatePassed,
+   979→      executedTestFiles: parse<string[]>(row.executedTestFilesJson, []),
+   980→      testRunnerOutputCcrId: row.testRunnerCcrId,
+   981→      agentBrowserResults: parse<AgentBrowserActionExecutionResult[]>(row.agentBrowserResultsJson, []),
+   982→      overallStatus: row.overallStatus as RuntimeVerificationReport['overallStatus'],
+   983→      createdAt: row.createdAt,
+   984→    }));
+   985→  }
+   986→}
+   987→

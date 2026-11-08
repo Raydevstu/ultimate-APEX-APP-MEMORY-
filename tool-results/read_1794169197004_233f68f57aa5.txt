@@ -1,0 +1,693 @@
+     1→/**
+     2→ * src/server/apexpad/guardrails.ts
+     3→ * TASK 3: Model Generation Guardrails & Anti-Truncation Patcher.
+     4→ *
+     5→ * Four deterministic gates run over every candidate LLM edit BEFORE it may be
+     6→ * staged downstream (blueprint §6.1 stage 3 / §7.6 STAGE 2):
+     7→ *   1. Anti-Truncation AST Merger  — detects lazy "// ... rest of existing code ..."
+     8→ *      placeholders and splices the dropped AST symbols back in from the previous
+     9→ *      file version, using the real TypeScript compiler AST (ts.createSourceFile).
+    10→ *   2. Package & Import Hallucination Verifier — cross-checks every import against
+    11→ *      Node builtins, the workspace package.json, imports already present in the
+    12→ *      previous file version (continuity), and indexed workspace paths.
+    13→ *   3. Version-Skew & Deprecated Syntax Scanner — detects mixed framework/module
+    14→ *      conventions with precise line numbers.
+    15→ *   4. Anti-Sycophancy Premise Critic — verifies identifiers asserted by the user
+    16→ *      prompt against the actual file AST + workspace index, refusing to silently
+    17→ *      accept premises that reference non-existent symbols.
+    18→ *
+    19→ * Stack adaptation: Prisma (async) replaces better-sqlite3 (sync); the
+    20→ * TypeScript compiler API replaces the Electron-side parser. Zero stubs.
+    21→ */
+    22→
+    23→import fs from 'fs';
+    24→import path from 'path';
+    25→import crypto from 'crypto';
+    26→import ts from 'typescript';
+    27→import { db } from '@/lib/db';
+    28→import { publishCaptureEvent } from './event-bus';
+    29→import { getWorkspaceFileStore } from './context-engine';
+    30→import type {
+    31→  GuardrailInspectionReport,
+    32→  TruncationPlaceholderMatch,
+    33→} from '@/lib/apexpad-guardrails-types';
+    34→
+    35→/* ------------------------------------------------------------------ */
+    36→/* Import-resolution primitives (shared with the Task 4 test gate)     */
+    37→/* ------------------------------------------------------------------ */
+    38→
+    39→const NODE_BUILTIN_MODULES: ReadonlySet<string> = new Set([
+    40→  'assert', 'async_hooks', 'buffer', 'child_process', 'cluster', 'console',
+    41→  'constants', 'crypto', 'dgram', 'diagnostics_channel', 'dns', 'domain',
+    42→  'events', 'fs', 'http', 'http2', 'https', 'inspector', 'module', 'net',
+    43→  'os', 'path', 'perf_hooks', 'process', 'punycode', 'querystring',
+    44→  'readline', 'repl', 'stream', 'string_decoder', 'sys', 'timers', 'tls',
+    45→  'trace_events', 'tty', 'url', 'util', 'v8', 'vm', 'wasi_http', 'worker_threads',
+    46→  'zlib', 'test',
+    47→]);
+    48→
+    49→const globalForPkgDeps = globalThis as unknown as {
+    50→  apexpadPackageNames: Set<string> | undefined;
+    51→};
+    52→
+    53→/** Dependency + devDependency names from the host workspace package.json (cached). */
+    54→export function getWorkspacePackageNames(): Set<string> {
+    55→  if (globalForPkgDeps.apexpadPackageNames) {
+    56→    return globalForPkgDeps.apexpadPackageNames;
+    57→  }
+    58→  const names = new Set<string>();
+    59→  try {
+    60→    const raw = fs.readFileSync(path.join(process.cwd(), 'package.json'), 'utf8');
+    61→    const pkg = JSON.parse(raw) as {
+    62→      dependencies?: Record<string, string>;
+    63→      devDependencies?: Record<string, string>;
+    64→      peerDependencies?: Record<string, string>;
+    65→    };
+    66→    for (const group of [pkg.dependencies, pkg.devDependencies, pkg.peerDependencies]) {
+    67→      if (!group) continue;
+    68→      for (const name of Object.keys(group)) names.add(name);
+    69→    }
+    70→  } catch {
+    71→    // package.json unreadable — allowlist stays empty; other gates still apply.
+    72→  }
+    73→  globalForPkgDeps.apexpadPackageNames = names;
+    74→  return names;
+    75→}
+    76→
+    77→/** Root package name of a bare import specifier ("@scope/pkg/sub" -> "@scope/pkg"). */
+    78→function rootPackageName(specifier: string): string {
+    79→  if (specifier.startsWith('@')) {
+    80→    const parts = specifier.split('/');
+    81→    return parts.length >= 2 ? `${parts[0]}/${parts[1]}` : specifier;
+    82→  }
+    83→  return specifier.split('/')[0];
+    84→}
+    85→
+    86→/** Workspace-store candidates for a relative / alias import specifier. */
+    87→function workspaceCandidates(specifier: string): string[] {
+    88→  let base = specifier;
+    89→  const aliases = ['@/', '~/'];
+    90→  for (const alias of aliases) {
+    91→    if (base.startsWith(alias)) {
+    92→      const rest = base.slice(alias.length);
+    93→      return [`src/${rest}`, rest].flatMap(expandPathCandidates);
+    94→    }
+    95→  }
+    96→  return expandPathCandidates(base);
+    97→}
+    98→
+    99→function expandPathCandidates(base: string): string[] {
+   100→  return [
+   101→    base,
+   102→    `${base}.ts`,
+   103→    `${base}.tsx`,
+   104→    `${base}.js`,
+   105→    `${base}.jsx`,
+   106→    `${base}.mjs`,
+   107→    `${base}.cjs`,
+   108→    `${base}.md`,
+   109→    `${base}/index.ts`,
+   110→    `${base}/index.tsx`,
+   111→    `${base}/index.js`,
+   112→  ];
+   113→}
+   114→
+   115→export interface ImportResolutionProblem {
+   116→  specifier: string;
+   117→  reason: string;
+   118→}
+   119→
+   120→/** Normalizes a virtual workspace path without touching the filesystem. */
+   121→export function normalizeWorkspacePath(p: string): string {
+   122→  const segments: string[] = [];
+   123→  for (const seg of p.split('/')) {
+   124→    if (seg === '' || seg === '.') continue;
+   125→    if (seg === '..') {
+   126→      segments.pop();
+   127→      continue;
+   128→    }
+   129→    segments.push(seg);
+   130→  }
+   131→  return segments.join('/');
+   132→}
+   133→
+   134→/**
+   135→ * Resolves every import of `proposedContent` against Node builtins, the host
+   136→ * package.json, imports already present in `previousContent` (continuity:
+   137→ * the previous file compiled, so its imports are presumed installed), and
+   138→ * the indexed workspace file store. Returns one problem per hallucinated
+   139→ * import (non-existent npm package or unresolvable workspace path).
+   140→ */
+   141→export function resolveImportProblems(params: {
+   142→  proposedContent: string;
+   143→  previousContent?: string;
+   144→  /** Path of the file whose imports are being resolved (for relative specs). */
+   145→  filePath?: string;
+   146→  workspaceFiles: Map<string, string>;
+   147→}): ImportResolutionProblem[] {
+   148→  const { proposedContent, previousContent, filePath, workspaceFiles } = params;
+   149→
+   150→  const specifiers = extractImportSpecifiers(proposedContent);
+   151→  const continuitySpecifiers = previousContent
+   152→    ? new Set(extractImportSpecifiers(previousContent))
+   153→    : new Set<string>();
+   154→  const continuityRoots = new Set<string>();
+   155→  for (const spec of continuitySpecifiers) {
+   156→    if (!spec.startsWith('.') && !spec.startsWith('@/') && !spec.startsWith('~/')) {
+   157→      continuityRoots.add(rootPackageName(spec));
+   158→    }
+   159→  }
+   160→
+   161→  const problems: ImportResolutionProblem[] = [];
+   162→  const packageNames = getWorkspacePackageNames();
+   163→
+   164→  const resolveRelative = (spec: string): boolean => {
+   165→    if (!filePath) {
+   166→      return workspaceCandidates(spec).some((c) => workspaceFiles.has(c));
+   167→    }
+   168→    const dir = filePath.includes('/') ? filePath.slice(0, filePath.lastIndexOf('/')) : '';
+   169→    const joined = spec.startsWith('./') || spec.startsWith('../') ? `${dir}/${spec}` : spec;
+   170→    const normalized = normalizeWorkspacePath(joined);
+   171→    const aliasNormalized =
+   172→      normalized.startsWith('@/') || normalized.startsWith('~/')
+   173→        ? normalizeWorkspacePath(`src/${normalized.slice(2)}`)
+   174→        : normalized;
+   175→    return workspaceCandidates(aliasNormalized).some((c) => workspaceFiles.has(c));
+   176→  };
+   177→
+   178→  for (const spec of specifiers) {
+   179→    if (spec.startsWith('node:')) continue;
+   180→    if (NODE_BUILTIN_MODULES.has(rootPackageName(spec))) continue;
+   181→
+   182→    if (spec.startsWith('./') || spec.startsWith('../') || spec.startsWith('@/') || spec.startsWith('~/')) {
+   183→      if (!resolveRelative(spec)) {
+   184→        problems.push({
+   185→          specifier: spec,
+   186→          reason: `unresolvable workspace import "${spec}" — no indexed file matches this relative/alias path`,
+   187→        });
+   188→      }
+   189→      continue;
+   190→    }
+   191→
+   192→    const root = rootPackageName(spec);
+   193→    const installed = packageNames.has(root);
+   194→    const continuity = continuityRoots.has(root);
+   195→    const onDisk = hostNodeModuleExists(root);
+   196→    if (!installed && !continuity && !onDisk) {
+   197→      problems.push({
+   198→        specifier: spec,
+   199→        reason:
+   200→          `hallucinated npm import "${spec}" — not declared in package.json, not a Node builtin, ` +
+   201→          `not installed in node_modules, and not present in the previous version of this file`,
+   202→      });
+   203→    }
+   204→  }
+   205→
+   206→  return problems;
+   207→}
+   208→
+   209→function hostNodeModuleExists(rootPackage: string): boolean {
+   210→  try {
+   211→    return fs.existsSync(path.join(process.cwd(), 'node_modules', rootPackage));
+   212→  } catch {
+   213→    return false;
+   214→  }
+   215→}
+   216→
+   217→/** Extracts every import specifier (static, export-from, dynamic import, require). */
+   218→export function extractImportSpecifiers(content: string): string[] {
+   219→  const specifiers = new Set<string>();
+   220→  const source = ts.createSourceFile('candidate.ts', content, ts.ScriptTarget.Latest, true);
+   221→
+   222→  const visit = (node: ts.Node): void => {
+   223→    if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
+   224→      specifiers.add(node.moduleSpecifier.text);
+   225→    } else if (
+   226→      ts.isExportDeclaration(node) &&
+   227→      node.moduleSpecifier &&
+   228→      ts.isStringLiteral(node.moduleSpecifier)
+   229→    ) {
+   230→      specifiers.add(node.moduleSpecifier.text);
+   231→    } else if (
+   232→      ts.isCallExpression(node) &&
+   233→      (node.expression.getText(source) === 'require' ||
+   234→        node.expression.kind === ts.SyntaxKind.ImportKeyword) &&
+   235→      node.arguments.length === 1 &&
+   236→      ts.isStringLiteral(node.arguments[0])
+   237→    ) {
+   238→      specifiers.add((node.arguments[0] as ts.StringLiteral).text);
+   239→    }
+   240→    ts.forEachChild(node, visit);
+   241→  };
+   242→  ts.forEachChild(source, visit);
+   243→
+   244→  // Regex backstop for specifiers inside template strings that the AST walk
+   245→  // cannot see (e.g. dynamic import of a composed path is intentionally NOT
+   246→  // followed — a computed specifier is unverifiable and reported separately).
+   247→  const requireRegex = /(?:require|import)\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
+   248→  let m: RegExpExecArray | null;
+   249→  while ((m = requireRegex.exec(content)) !== null) {
+   250→    specifiers.add(m[1]);
+   251→  }
+   252→  return Array.from(specifiers);
+   253→}
+   254→
+   255→/* ------------------------------------------------------------------ */
+   256→/* AST symbol extraction (real TypeScript compiler AST)                */
+   257→/* ------------------------------------------------------------------ */
+   258→
+   259→interface ExportedSymbolSource {
+   260→  name: string;
+   261→  fullText: string;
+   262→}
+   263→
+   264→function scriptKindFor(filePath: string): ts.ScriptKind {
+   265→  if (filePath.endsWith('.tsx')) return ts.ScriptKind.TSX;
+   266→  if (filePath.endsWith('.jsx')) return ts.ScriptKind.JSX;
+   267→  if (filePath.endsWith('.js') || filePath.endsWith('.mjs') || filePath.endsWith('.cjs')) {
+   268→    return ts.ScriptKind.JS;
+   269→  }
+   270→  return ts.ScriptKind.TS;
+   271→}
+   272→
+   273→/** Top-level exported (or module-level) symbols with their full source text. */
+   274→export function extractTopLevelSymbols(
+   275→  content: string,
+   276→  filePath: string
+   277→): ExportedSymbolSource[] {
+   278→  const source = ts.createSourceFile(filePath, content, ts.ScriptTarget.Latest, true, scriptKindFor(filePath));
+   279→  const symbols: ExportedSymbolSource[] = [];
+   280→
+   281→  const pushSymbol = (name: string, node: ts.Node) => {
+   282→    if (!name) return;
+   283→    symbols.push({
+   284→      name,
+   285→      fullText: source.text.slice(node.getFullStart(), node.getEnd()).trimEnd(),
+   286→    });
+   287→  };
+   288→
+   289→  for (const statement of source.statements) {
+   290→    if (
+   291→      ts.isFunctionDeclaration(statement) ||
+   292→      ts.isClassDeclaration(statement) ||
+   293→      ts.isInterfaceDeclaration(statement) ||
+   294→      ts.isEnumDeclaration(statement) ||
+   295→      ts.isTypeAliasDeclaration(statement)
+   296→    ) {
+   297→      if (statement.name) pushSymbol(statement.name.text, statement);
+   298→    } else if (ts.isVariableStatement(statement)) {
+   299→      const isExported = statement.modifiers.some(
+   300→        (mod) => mod.kind === ts.SyntaxKind.ExportKeyword
+   301→      );
+   302→      if (!isExported) continue;
+   303→      for (const decl of statement.declarationList.declarations) {
+   304→        if (ts.isIdentifier(decl.name)) pushSymbol(decl.name.text, statement);
+   305→      }
+   306→    }
+   307→  }
+   308→  return symbols;
+   309→}
+   310→
+   311→function symbolIsPresent(content: string, symbolName: string): boolean {
+   312→  const re = new RegExp(`\\b${symbolName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`);
+   313→  return re.test(content);
+   314→}
+   315→
+   316→/* ------------------------------------------------------------------ */
+   317→/* Gate 1: truncation placeholder detection                            */
+   318→/* ------------------------------------------------------------------ */
+   319→
+   320→const TRUNCATION_LINE_PATTERNS: RegExp[] = [
+   321→  /^\/\/\s*\.{3,}/,                                    // "// ... rest of existing code ..."
+   322→  /^\/\*+\s*\.{3,}/,                                   // "/* ... */"
+   323→  /^\/\/\s*(rest\s+of|remaining|omitted|unchanged|existing\s+code|other\s+code|code\s+omitted|and\s+so\s+on|etc)/i,
+   324→  /^\/\*\s*(rest\s+of|remaining|omitted|unchanged|existing\s+code)/i,
+   325→  /^<!--\s*(rest\s+of|remaining|omitted)/i,
+   326→  /^#\s*(rest\s+of|remaining|omitted)/i,
+   327→  /^\s*\.{3,}\s*$/,                                    // a line containing only "..."
+   328→  /^\/\/\s*TODO\b.*\b(implement|rest|remaining|fill)/i,
+   329→  /^\/\/\s*\[?icc\b/i, // internal lazy marker
+   330→  /^\/\/\s*(implementation\s+(elided|omitted|unchanged))/i,
+   331→];
+   332→
+   333→function isTruncationPlaceholderLine(rawLine: string): boolean {
+   334→  const trimmed = rawLine.trim();
+   335→  if (trimmed.length === 0) return false;
+   336→  return TRUNCATION_LINE_PATTERNS.some((re) => re.test(trimmed));
+   337→}
+   338→
+   339→/* ------------------------------------------------------------------ */
+   340→/* Gate 3: version-skew scanner                                        */
+   341→/* ------------------------------------------------------------------ */
+   342→
+   343→interface VersionSkewRule {
+   344→  id: string;
+   345→  regex: RegExp;
+   346→  warning: string;
+   347→  /** Only apply when the raw line matches this precondition. */
+   348→  wholeFile?: RegExp;
+   349→}
+   350→
+   351→const VERSION_SKEW_RULES: VersionSkewRule[] = [
+   352→  {
+   353→    id: 'mixed_module_systems',
+   354→    regex: /\brequire\s*\(\s*['"][^'"]+['"]\s*\)/,
+   355→    warning:
+   356→      'Mixed module systems: CommonJS require() alongside ESM import statements — pick one convention for this file.',
+   357→    wholeFile: /(?:^|\n)\s*import\s+(?:[^'"]*from\s+)?['"]/,
+   358→  },
+   359→  {
+   360→    id: 'legacy_class_api',
+   361→    regex: /React\.createClass/,
+   362→    warning:
+   363→      'React.createClass is the legacy React 15 API — use function components with hooks or ES class components.',
+   364→  },
+   365→  {
+   366→    id: 'deprecated_lifecycle',
+   367→    regex: /componentWillMount|componentWillReceiveProps|componentWillUpdate\b/,
+   368→    warning:
+   369→      'Deprecated React lifecycle (componentWillMount/ReceiveProps/Update) — migrate to getDerivedStateFromProps / componentDidMount / useEffect.',
+   370→  },
+   371→  {
+   372→    id: 'deprecated_buffer_api',
+   373→    regex: /new\s+Buffer\s*\(/,
+   374→    warning:
+   375→      'new Buffer() is the deprecated Node 8 Buffer allocation API — use Buffer.from() or Buffer.alloc().',
+   376→  },
+   377→  {
+   378→    id: 'legacy_react_render',
+   379→    regex: /ReactDOM\.render\s*\(/,
+   380→    warning:
+   381→      'ReactDOM.render is the React 17 entry API — use createRoot(document.getElementById(...)).render() for React 18+.',
+   382→  },
+   383→  {
+   384→    id: 'pages_router_in_app',
+   385→    regex: /getInitialProps/,
+   386→    warning:
+   387→      'getInitialProps is a Next.js Pages Router API — App Router components must use React server/client component semantics instead.',
+   388→  },
+   389→  {
+   390→    id: 'mixed_class_and_hooks',
+   391→    regex: /\bextends\s+(?:React\.)?Component\b/,
+   392→    warning:
+   393→      'Class component declared in a file that also uses React hooks — do not mix class and function component paradigms in one module.',
+   394→    wholeFile: /\buse(?:State|Effect|Memo|Callback|Ref|Reducer)\s*[<(]/,
+   395→  },
+   396→  {
+   397→    id: 'mixed_test_frameworks',
+   398→    regex: /\bjest\.(fn|mock|spyOn|describe|it|expect)\b/,
+   399→    warning:
+   400→      'Jest globals mixed into a Vitest test module — use vitest imports (describe/it/expect/vi) consistently.',
+   401→    wholeFile: /(?:^|\n)\s*import\s+\{[^}]*\}\s+from\s+['"]vitest['"]/,
+   402→  },
+   403→];
+   404→
+   405→function scanVersionSkew(proposedContent: string): string[] {
+   406→  const lines = proposedContent.split('\n');
+   407→  const warnings: string[] = [];
+   408→  for (const rule of VERSION_SKEW_RULES) {
+   409→    if (rule.wholeFile && !rule.wholeFile.test(proposedContent)) continue;
+   410→    for (let i = 0; i < lines.length; i++) {
+   411→      if (rule.regex.test(lines[i])) {
+   412→        warnings.push(`line ${i + 1}: ${rule.warning}`);
+   413→        break; // one warning per rule, first occurrence carries the line number
+   414→      }
+   415→    }
+   416→  }
+   417→  return warnings;
+   418→}
+   419→
+   420→/* ------------------------------------------------------------------ */
+   421→/* Gate 4: anti-sycophancy premise critic                              */
+   422→/* ------------------------------------------------------------------ */
+   423→
+   424→const SYCOPHANCY_STOPWORDS: ReadonlySet<string> = new Set([
+   425→  'because', 'should', 'would', 'could', 'there', 'seems', 'maybe', 'please',
+   426→  'verify', 'check', 'crashing', 'broken', 'issue', 'problem', 'error',
+   427→  'thinking', 'refactor', 'implement', 'update', 'create', 'connect',
+   428→  'function', 'export', 'import', 'return', 'const', 'value', 'makes',
+   429→  'surely', 'obviously', 'clearly', 'instead', 'another', 'different',
+   430→  'together', 'everything', 'anything', 'nothing', 'something', 'before',
+   431→  'after', 'while', 'about', 'which', 'where', 'these', 'those', 'their',
+   432→  'there', 'that', 'this', 'with', 'from', 'have', 'when', 'what', 'then',
+   433→  'them', 'were', 'been', 'also', 'into', 'only', 'over', 'such', 'each',
+   434→  'will', 'must', 'does', 'doing', 'file', 'code', 'line', 'cache', 'crash',
+   435→]);
+   436→
+   437→function extractPremiseTokens(userPrompt: string): string[] {
+   438→  const raw = userPrompt.match(/[A-Za-z_][A-Za-z0-9_]{5,}/g) ?? [];
+   439→  const seen = new Set<string>();
+   440→  for (const token of raw) {
+   441→    if (SYCOPHANCY_STOPWORDS.has(token.toLowerCase())) continue;
+   442→    if (token.length < 8) continue; // short words are too noisy to premise-check
+   443→    seen.add(token);
+   444→  }
+   445→  return Array.from(seen).slice(0, 12);
+   446→}
+   447→
+   448→/* ------------------------------------------------------------------ */
+   449→/* TASK 3 ENGINE                                                       */
+   450→/* ------------------------------------------------------------------ */
+   451→
+   452→export interface GuardrailReportSummary {
+   453→  guardId: string;
+   454→  sessionId: string;
+   455→  targetFilePath: string;
+   456→  passedAllGates: boolean;
+   457→  wasAutoHealed: boolean;
+   458→  recoveredSymbolCount: number;
+   459→  hallucinatedImportCount: number;
+   460→  versionSkewCount: number;
+   461→  sycophancyCount: number;
+   462→  createdAt: string;
+   463→}
+   464→
+   465→export class ModelGenerationGuardrails {
+   466→  /**
+   467→   * Runs all four Task 3 gates over a candidate edit and persists the report.
+   468→   * The returned `healedContent` is what downstream stages (DAG staging) MUST
+   469→   * consume — never the raw proposed content (blueprint §7.6 STAGE 2).
+   470→   */
+   471→  public async inspectAndHealCandidateCode(params: {
+   472→    sessionId: string;
+   473→    projectSlug: string;
+   474→    targetFilePath: string;
+   475→    previousContent: string;
+   476→    proposedContent: string;
+   477→    userPrompt: string;
+   478→  }): Promise<GuardrailInspectionReport> {
+   479→    const startedAt = Date.now();
+   480→    const guardId = `guard_${crypto.randomBytes(6).toString('hex')}`;
+   481→    const createdAt = new Date().toISOString();
+   482→
+   483→    /* -- Gate 1: Anti-Truncation AST Merger -------------------------------- */
+   484→    const truncationMatches: TruncationPlaceholderMatch[] = [];
+   485→    const missingSymbolsRecovered: string[] = [];
+   486→    let healedContent = params.proposedContent;
+   487→    let wasAutoHealed = false;
+   488→
+   489→    const placeholderLines = params.proposedContent
+   490→      .split('\n')
+   491→      .map((rawLine, idx) => ({ rawLine, lineNumber: idx + 1 }))
+   492→      .filter(({ rawLine }) => isTruncationPlaceholderLine(rawLine));
+   493→
+   494→    if (placeholderLines.length > 0) {
+   495→      const previousSymbols = extractTopLevelSymbols(params.previousContent, params.targetFilePath);
+   496→      const missing = previousSymbols.filter(
+   497→        (sym) => !symbolIsPresent(params.proposedContent, sym.name)
+   498→      );
+   499→
+   500→      // Splice every missing symbol at the FIRST placeholder position and drop
+   501→      // the remaining placeholders entirely — deterministic and idempotent.
+   502→      const spliceBlock = missing.map((sym) => sym.fullText).join('\n\n');
+   503→      let insertionDone = false;
+   504→      const rebuiltLines: string[] = [];
+   505→      for (const line of params.proposedContent.split('\n')) {
+   506→        if (isTruncationPlaceholderLine(line)) {
+   507→          if (!insertionDone) {
+   508→            if (rebuiltLines.length > 0 && rebuiltLines[rebuiltLines.length - 1].trim() !== '') {
+   509→              rebuiltLines.push('');
+   510→            }
+   511→            rebuiltLines.push(spliceBlock);
+   512→            insertionDone = true;
+   513→          }
+   514→          continue; // placeholder removed
+   515→        }
+   516→        rebuiltLines.push(line);
+   517→      }
+   518→
+   519→      healedContent = rebuiltLines.join('\n');
+   520→      wasAutoHealed = true;
+   521→      missingSymbolsRecovered.push(...missing.map((sym) => sym.name));
+   522→
+   523→      for (const placeholder of placeholderLines) {
+   524→        truncationMatches.push({
+   525→          lineNumber: placeholder.lineNumber,
+   526→          rawLine: placeholder.rawLine,
+   527→          recoveredSymbolNames: missing.map((sym) => sym.name),
+   528→        });
+   529→      }
+   530→    }
+   531→
+   532→    /* -- Gate 2: Import Hallucination Verifier ----------------------------- */
+   533→    const importProblems = resolveImportProblems({
+   534→      proposedContent: healedContent,
+   535→      previousContent: params.previousContent,
+   536→      filePath: params.targetFilePath,
+   537→      workspaceFiles: getWorkspaceFileStore(),
+   538→    });
+   539→    const hallucinatedImports = importProblems.map(
+   540→      (p) => `${p.specifier} — ${p.reason}`
+   541→    );
+   542→
+   543→    /* -- Gate 3: Version-Skew Scanner -------------------------------------- */
+   544→    const versionSkewWarnings = scanVersionSkew(healedContent);
+   545→
+   546→    /* -- Gate 4: Anti-Sycophancy Premise Critic ----------------------------- */
+   547→    const sycophancyWarnings = await this.critiqueUserPremises(
+   548→      params.userPrompt,
+   549→      params.targetFilePath,
+   550→      params.previousContent,
+   551→      healedContent,
+   552→      params.projectSlug
+   553→    );
+   554→
+   555→    const placeholderRemaining = healedContent
+   556→      .split('\n')
+   557→      .some((line) => isTruncationPlaceholderLine(line));
+   558→    const passedAllGates = hallucinatedImports.length === 0 && !placeholderRemaining;
+   559→
+   560→    const report: GuardrailInspectionReport = {
+   561→      guardId,
+   562→      sessionId: params.sessionId,
+   563→      targetFilePath: params.targetFilePath,
+   564→      passedAllGates,
+   565→      wasAutoHealed,
+   566→      healedContent,
+   567→      truncationMatches,
+   568→      missingSymbolsRecovered,
+   569→      hallucinatedImports,
+   570→      versionSkewWarnings,
+   571→      sycophancyWarnings,
+   572→      createdAt,
+   573→    };
+   574→
+   575→    await db.guardrailReport.create({
+   576→      data: {
+   577→        guardId,
+   578→        sessionId: params.sessionId,
+   579→        targetFilePath: params.targetFilePath,
+   580→        passedAllGates,
+   581→        wasAutoHealed,
+   582→        healedContent,
+   583→        truncationMatchesJson: JSON.stringify(truncationMatches),
+   584→        recoveredSymbolsJson: JSON.stringify(missingSymbolsRecovered),
+   585→        hallucinatedImportsJson: JSON.stringify(hallucinatedImports),
+   586→        versionSkewWarningsJson: JSON.stringify(versionSkewWarnings),
+   587→        sycophancyWarningsJson: JSON.stringify(sycophancyWarnings),
+   588→        createdAt,
+   589→      },
+   590→    });
+   591→
+   592→    publishCaptureEvent('guardrail:report', params.sessionId, params.projectSlug, {
+   593→      guardId,
+   594→      targetFilePath: params.targetFilePath,
+   595→      passedAllGates,
+   596→      wasAutoHealed,
+   597→      recovered: missingSymbolsRecovered.length,
+   598→      hallucinatedImports: hallucinatedImports.length,
+   599→      versionSkewWarnings: versionSkewWarnings.length,
+   600→      sycophancyWarnings: sycophancyWarnings.length,
+   601→      gatesLatencyMs: Date.now() - startedAt,
+   602→    });
+   603→
+   604→    return report;
+   605→  }
+   606→
+   607→  /** Recent guardrail reports (newest first) without heavy healed content. */
+   608→  public async listRecentReports(sessionId?: string, limit = 12): Promise<GuardrailReportSummary[]> {
+   609→    const rows = await db.guardrailReport.findMany({
+   610→      where: sessionId ? { sessionId } : undefined,
+   611→      orderBy: { createdAt: 'desc' },
+   612→      take: limit,
+   613→      select: {
+   614→        guardId: true,
+   615→        sessionId: true,
+   616→        targetFilePath: true,
+   617→        passedAllGates: true,
+   618→        wasAutoHealed: true,
+   619→        recoveredSymbolsJson: true,
+   620→        hallucinatedImportsJson: true,
+   621→        versionSkewWarningsJson: true,
+   622→        sycophancyWarningsJson: true,
+   623→        createdAt: true,
+   624→      },
+   625→    });
+   626→    const count = (json: string): number => {
+   627→      try {
+   628→        const parsed: unknown = JSON.parse(json);
+   629→        return Array.isArray(parsed) ? parsed.length : 0;
+   630→      } catch {
+   631→        return 0;
+   632→      }
+   633→    };
+   634→    return rows.map((row) => ({
+   635→      guardId: row.guardId,
+   636→      sessionId: row.sessionId,
+   637→      targetFilePath: row.targetFilePath,
+   638→      passedAllGates: row.passedAllGates,
+   639→      wasAutoHealed: row.wasAutoHealed,
+   640→      recoveredSymbolCount: count(row.recoveredSymbolsJson),
+   641→      hallucinatedImportCount: count(row.hallucinatedImportsJson),
+   642→      versionSkewCount: count(row.versionSkewWarningsJson),
+   643→      sycophancyCount: count(row.sycophancyWarningsJson),
+   644→      createdAt: row.createdAt,
+   645→    }));
+   646→  }
+   647→
+   648→  /**
+   649→   * Critic: every substantial identifier the user asserts in their prompt is
+   650→   * checked against the previous content, the healed content, the indexed AST
+   651→   * symbols and the workspace store. Unknown identifiers produce explicit
+   652→   * sycophancy warnings instead of being silently accepted.
+   653→   */
+   654→  private async critiqueUserPremises(
+   655→    userPrompt: string,
+   656→    targetFilePath: string,
+   657→    previousContent: string,
+   658→    healedContent: string,
+   659→    projectSlug: string
+   660→  ): Promise<string[]> {
+   661→    const tokens = extractPremiseTokens(userPrompt);
+   662→    if (tokens.length === 0) return [];
+   663→
+   664→    const indexedSymbols = await db.astSymbol.findMany({
+   665→      where: { projectSlug },
+   666→      select: { symbolName: true },
+   667→    });
+   668→    const indexedNames = new Set(indexedSymbols.map((s) => s.symbolName));
+   669→
+   670→    const workspaceTexts: string[] = [];
+   671→    for (const [, content] of getWorkspaceFileStore().entries()) {
+   672→      workspaceTexts.push(content);
+   673→    }
+   674→
+   675→    const warnings: string[] = [];
+   676→    for (const token of tokens) {
+   677→      const inPrevious = symbolIsPresent(previousContent, token);
+   678→      const inHealed = symbolIsPresent(healedContent, token);
+   679→      const inIndex = indexedNames.has(token);
+   680→      const inWorkspace = workspaceTexts.some((text) => text.includes(token));
+   681→      if (!inPrevious && !inHealed && !inIndex && !inWorkspace) {
+   682→        warnings.push(
+   683→          `Anti-sycophancy: the user premise references "${token}", which does not appear in ` +
+   684→            `${targetFilePath}, the healed candidate, the indexed AST symbols, or the workspace. ` +
+   685→            `Verify the hypothesis against real evidence instead of accepting it.`
+   686→        );
+   687→        if (warnings.length >= 5) break;
+   688→      }
+   689→    }
+   690→    return warnings;
+   691→  }
+   692→}
+   693→
